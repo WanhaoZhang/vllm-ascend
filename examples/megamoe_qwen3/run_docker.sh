@@ -4,7 +4,9 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0-a5}"
 CONTAINER_NAME="${CONTAINER_NAME:-megamoe-qwen3}"
+MODE="${MODE:-native}"
 MODEL_PATH="${MODEL_PATH:-}"
+SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-Qwen3-30B-A3B}"
 NPU_DEVICES="${NPU_DEVICES:-0}"
 PORT="${PORT:-18080}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-4096}"
@@ -14,16 +16,34 @@ GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.70}"
 ENABLE_EXPERT_PARALLEL="${ENABLE_EXPERT_PARALLEL:-auto}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-300}"
 RECREATE="${RECREATE:-0}"
+VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE:-}"
+CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
+CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
+CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
+CATCCOS_MINM="${CATCCOS_MINM:-64}"
+CATCCOS_WEIGHT_QUANT_BACKEND="${CATCCOS_WEIGHT_QUANT_BACKEND:-npu}"
+CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-1}"
 
 usage() {
     cat <<'EOF'
 Usage:
   MODEL_PATH=/path/to/Qwen3-30B-A3B NPU_DEVICES=0,1 bash run_docker.sh
 
+  MODE=catccos \
+  VLLM_ASCEND_SOURCE=/path/to/vllm-ascend \
+  CATCCOS_SOURCE=/path/to/catccos \
+  MODEL_PATH=/path/to/Qwen3-30B-A3B \
+  NPU_DEVICES=0,1 bash run_docker.sh
+
 Optional environment variables:
-  IMAGE, CONTAINER_NAME, PORT, MAX_MODEL_LEN, MAX_NUM_BATCHED_TOKENS,
-  MAX_NUM_SEQS, GPU_MEMORY_UTILIZATION, ENABLE_EXPERT_PARALLEL,
-  HEALTH_TIMEOUT, RECREATE
+  MODE (native or catccos), IMAGE, CONTAINER_NAME, SERVED_MODEL_NAME,
+  PORT, MAX_MODEL_LEN, MAX_NUM_BATCHED_TOKENS, MAX_NUM_SEQS,
+  GPU_MEMORY_UTILIZATION, ENABLE_EXPERT_PARALLEL, HEALTH_TIMEOUT, RECREATE
+
+CatCCOS mode:
+  VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
+  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MINM,
+  CATCCOS_WEIGHT_QUANT_BACKEND (npu or cpu), and CATCCOS_SYNC_DEVICE (0 or 1).
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing
@@ -47,6 +67,29 @@ fail() {
 }
 command -v docker >/dev/null || fail "docker is not installed"
 command -v curl >/dev/null || fail "curl is not installed"
+
+case "${MODE}" in
+    native) ;;
+    catccos)
+        [[ -d "${VLLM_ASCEND_SOURCE}" ]] || {
+            fail "VLLM_ASCEND_SOURCE is required in catccos mode"
+        }
+        [[ -d "${CATCCOS_SOURCE}" ]] || {
+            fail "CATCCOS_SOURCE is required in catccos mode"
+        }
+        catccos_library="${CATCCOS_SOURCE}/build_torch_a5/lib/libcatccos_torch.so"
+        [[ -f "${catccos_library}" ]] || {
+            fail "CatCCOS extension is missing: ${catccos_library}"
+        }
+        [[ "${CATCCOS_WEIGHT_QUANT_BACKEND}" =~ ^(npu|cpu)$ ]] || {
+            fail "CATCCOS_WEIGHT_QUANT_BACKEND must be npu or cpu"
+        }
+        [[ "${CATCCOS_SYNC_DEVICE}" =~ ^[01]$ ]] || {
+            fail "CATCCOS_SYNC_DEVICE must be 0 or 1"
+        }
+        ;;
+    *) fail "MODE must be native or catccos" ;;
+esac
 
 IFS=',' read -r -a device_ids <<<"${NPU_DEVICES}"
 (( ${#device_ids[@]} > 0 )) || fail "NPU_DEVICES is empty"
@@ -101,7 +144,7 @@ esac
 
 serve_args=(
     vllm serve /model
-    --served-model-name Qwen3-30B-A3B
+    --served-model-name "${SERVED_MODEL_NAME}"
     --trust-remote-code
     --dtype bfloat16
     --max-model-len "${MAX_MODEL_LEN}"
@@ -115,6 +158,24 @@ serve_args=(
 )
 
 docker_env=()
+source_mounts=()
+if [[ "${MODE}" == "catccos" ]]; then
+    source_mounts=(
+        -v "${VLLM_ASCEND_SOURCE}:/vllm-workspace/vllm-ascend:ro"
+        -v "${CATCCOS_SOURCE}:/workspace/catccos:ro"
+    )
+    docker_env+=(
+        -e VLLM_ASCEND_CATCCOS=1
+        -e VLLM_ASCEND_CATCCOS_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so
+        -e VLLM_ASCEND_CATCCOS_UTILS_PATH=/workspace/catccos/examples/utils
+        -e "VLLM_ASCEND_CATCCOS_IPPORT=${CATCCOS_IPPORT}"
+        -e "VLLM_ASCEND_CATCCOS_MEM=${CATCCOS_MEM}"
+        -e "VLLM_ASCEND_CATCCOS_MINM=${CATCCOS_MINM}"
+        -e "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND=${CATCCOS_WEIGHT_QUANT_BACKEND}"
+        -e "VLLM_ASCEND_CATCCOS_SYNC_DEVICE=${CATCCOS_SYNC_DEVICE}"
+        -e LD_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib:/workspace/catccos/3rdparty/shmem/install/shmem/lib
+    )
+fi
 if (( parallel_size > 1 )); then
     serve_args+=(
         --tensor-parallel-size "${parallel_size}"
@@ -138,7 +199,7 @@ if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     fi
 fi
 
-echo "Starting ${CONTAINER_NAME} with TP=${parallel_size}, EP=${enable_ep}"
+echo "Starting ${CONTAINER_NAME} in ${MODE} mode with TP=${parallel_size}, EP=${enable_ep}"
 echo "Image: ${IMAGE}"
 echo "NPUs: ${NPU_DEVICES}"
 
@@ -152,6 +213,7 @@ docker run -d \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi:ro \
     -v /etc/ascend_install.info:/etc/ascend_install.info:ro \
     -v "${MODEL_PATH}:/model:ro" \
+    "${source_mounts[@]}" \
     "${topology_mounts[@]}" \
     "${docker_env[@]}" \
     -e PYTORCH_NPU_ALLOC_CONF=expandable_segments:True \

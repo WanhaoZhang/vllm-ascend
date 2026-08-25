@@ -56,9 +56,15 @@ the operator can be separated from TP/EP and topology issues.
 
 ## Current documentation and evaluation work
 
-The current change makes `run_docker.sh` select `MODE=native` or
+### `2a80c511` — reproducible deployment and AISBench hand-off
+
+Made `run_docker.sh` select `MODE=native` or
 `MODE=catccos`, adds reproducible 950DT hand-off instructions, provides an
 environment-driven AISBench model configuration and GSM8K runner, and records
-single-NPU test results. Its final commit hash is recorded in the Git history;
-the files in this section are intentionally committed together so the guide,
-scripts, and reported results cannot drift independently.
+single-NPU smoke results.
+
+### Multi-NPU report and partial accuracy evidence
+
+Added a Chinese TP2/TP4 execution report and recorded the intentionally
+stopped 185-sample common-prefix accuracy comparison. The final hash is the
+commit following `2a80c511` in this branch.

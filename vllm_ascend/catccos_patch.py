@@ -223,10 +223,14 @@ def _catccos_forward_impl(
 
     original_shape = hidden_states.shape
     hidden_states = hidden_states.reshape(-1, original_shape[-1]).contiguous()
+    expert_idx = topk_ids.to(torch.int32).contiguous()
+    gate_weight = topk_weights.to(torch.float32).contiguous()
+    # The direct CCEC launcher is outside torch_npu's dependency scheduler.
+    torch.npu.synchronize()
     output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
         hidden_states,
-        topk_ids.to(torch.int32).contiguous(),
-        topk_weights.to(torch.float32).contiguous(),
+        expert_idx,
+        gate_weight,
         cache["w1"],
         cache["w1_scale"],
         cache["w2"],

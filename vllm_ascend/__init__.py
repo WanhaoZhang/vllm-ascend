@@ -58,6 +58,12 @@ def _ensure_global_patch():
     from vllm_ascend.utils import adapt_patch
 
     adapt_patch(is_global_patch=True)
+    from vllm_ascend import envs as envs_ascend
+
+    if envs_ascend.VLLM_ASCEND_CATCCOS:
+        from vllm_ascend.catccos_patch import apply_catccos_patch
+
+        apply_catccos_patch()
     _GLOBAL_PATCH_APPLIED = True
 
 

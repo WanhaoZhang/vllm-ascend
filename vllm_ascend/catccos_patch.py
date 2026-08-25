@@ -181,8 +181,9 @@ def _should_use_native_path(layer, hidden_states: torch.Tensor, return_with_even
         raise ValueError("CatCCOS A5 does not support dynamic EPLB")
     if getattr(layer, "quant_config", None) is not None:
         raise ValueError("CatCCOS A5 currently requires an unquantized BF16 model")
-    if getattr(layer, "activation", "silu") != "silu":
-        raise ValueError(f"CatCCOS A5 requires SiLU activation, got {layer.activation}")
+    activation = getattr(layer, "activation", "silu")
+    if getattr(activation, "value", activation) != "silu":
+        raise ValueError(f"CatCCOS A5 requires SiLU activation, got {activation}")
     return False
 
 

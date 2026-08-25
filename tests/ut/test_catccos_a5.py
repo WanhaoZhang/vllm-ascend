@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from enum import Enum
 from types import SimpleNamespace
 from unittest import TestCase, mock
 
@@ -14,6 +15,9 @@ from vllm_ascend.catccos_patch import (
 
 
 class TestCatccosA5(TestCase):
+    class Activation(Enum):
+        SILU = "silu"
+
     def test_qwen3_moe_weight_shapes_are_supported(self):
         w1 = torch.empty(8, 1536, 2048, device="meta")
         w2 = torch.empty(8, 2048, 768, device="meta")
@@ -51,6 +55,16 @@ class TestCatccosA5(TestCase):
 
         with self.assertRaisesRegex(ValueError, "dynamic EPLB"):
             _should_use_native_path(layer, torch.empty(64, 2048), False)
+
+    def test_accepts_silu_enum(self):
+        layer = SimpleNamespace(
+            _shared_experts=None,
+            dynamic_eplb=False,
+            quant_config=None,
+            activation=self.Activation.SILU,
+        )
+
+        self.assertFalse(_should_use_native_path(layer, torch.empty(64, 2048), False))
 
     def test_rejects_unknown_weight_quantization_backend(self):
         with (

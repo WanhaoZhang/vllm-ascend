@@ -230,6 +230,37 @@ The performance run used streaming, concurrency one, no warmup, an average of
 to infer a performance advantage or accuracy parity. The result only proves
 that the repository runner and both single-NPU endpoints work end to end.
 
+### Partial correctness run
+
+A later full-split attempt used non-streaming deterministic generation,
+`max_out_len=1024`, concurrency eight, and one warmup. It was intentionally
+stopped after enough common samples were available to detect a large
+single-NPU regression; it is not a full GSM8K score.
+
+The native endpoint completed 373 samples and the CatCCOS endpoint completed
+185 samples before SIGTERM. The comparison below uses only the common prefix,
+IDs 0 through 185 with 185 successfully written samples. Scores were
+recomputed with AISBench's own `gsm8k_postprocess`,
+`gsm8k_dataset_postprocess`, and `Gsm8kEvaluator`.
+
+| Partial prefix metric, 185 prompts | Native | CatCCOS |
+|---|---:|---:|
+| Correct | 155 | 158 |
+| Accuracy | 83.78% | 85.41% |
+| Failed requests | 0 | 0 |
+
+The CatCCOS-minus-native delta was +1.62 percentage points. The extracted
+final answer was identical for 151 of 185 prompts. Native alone was correct
+on seven prompts and CatCCOS alone was correct on ten prompts. This result
+does not show the catastrophic single-NPU accuracy regression seen in an
+earlier EP4 report, but it cannot establish full-dataset parity or multi-rank
+correctness.
+
+The two evaluation processes exited with code 143 because they were stopped
+deliberately. Both vLLM services remained healthy. Partial artifacts are under
+`/home/z00956592/megamoe-vllm/tools/benchmark/outputs/full-gsm8k-20260825`
+on `a5new`.
+
 ## 8. Failure triage order
 
 1. Confirm `/health`, `/v1/models`, and the exact served model ID.

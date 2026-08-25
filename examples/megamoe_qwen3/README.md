@@ -15,6 +15,8 @@ The integration currently targets the official
   TP2/TP4, verification, and troubleshooting steps for another 950DT server.
 - [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md): controlled native-versus-CatCCOS
   GSM8K accuracy and performance evaluation.
+- [MULTI_NPU_TEST_REPORT.md](MULTI_NPU_TEST_REPORT.md): Chinese execution report
+  and acceptance checklist for TP2/EP2 and TP4/EP4 on another 950DT server.
 - [CHANGELOG.md](CHANGELOG.md): purpose and validation status of every commit
   in this integration branch.
 - `run_docker.sh`: launches either the native or CatCCOS service.

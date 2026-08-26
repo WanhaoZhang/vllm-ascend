@@ -23,6 +23,30 @@
 | AISBench | source install，已验证版本 3.1.0 |
 | Dataset | AISBench/OpenCompass GSM8K test split，1319 条 |
 
+### 2.1 `a5new` 单卡参考环境
+
+2026-08-26 已在 `a5new` 重新确认当前 0.23.0 分支与运行容器的
+对应关系：
+
+- vLLM-Ascend 分支为 `codex/megamoe-vllm-v023@a2fa5c2b`，基线为
+  `v0.23.0@5cb98caa`。
+- Docker client/server 均为 29.6.2，API 1.55；宿主机为 Ubuntu
+  24.04.4 LTS、kernel 6.8.0-136-generic。
+- 运行镜像为 `quay.io/ascend/vllm-ascend:v0.23.0-a5`，digest 为
+  `sha256:cc57064f119054904dc81360cd1105d211fa9b91bf726486926dd025c26f17b7`。
+- 镜像内 Git HEAD 正是 `v0.23.0@5cb98caa`；分支的 `__init__.py`、
+  `envs.py` 和 `catccos_patch.py` 通过 bind mount 覆盖镜像文件，
+  宿主机与容器内 SHA-256 逐文件一致。
+- `tests/ut/test_catccos_a5.py` 结果为 6 passed。320-token 真实
+  请求超过 `CATCCOS_MINM=64` 并返回 HTTP 200/正确答案 `42`；
+  容器 restart count 为 0，本轮日志无新 ERROR/Traceback。
+
+这是“官方 v0.23.0 镜像 + 三个运行时补丁文件 + CatCCOS 动态库”
+的组合，不是把整个分支重新构建成镜像。后续若修改其他
+`vllm_ascend` 源码，必须增加挂载或重新构建完整镜像，否则容器
+不会使用新修改。详细校验命令见
+[CATCCOS_950DT_GUIDE.md](CATCCOS_950DT_GUIDE.md)。
+
 测试前记录实际 commit 和镜像 digest：
 
 ```bash

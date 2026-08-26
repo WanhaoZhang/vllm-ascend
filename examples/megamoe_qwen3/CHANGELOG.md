@@ -69,3 +69,12 @@ single-NPU smoke results.
 Added a Chinese TP2/TP4 execution report and recorded the intentionally
 stopped 185-sample common-prefix accuracy comparison. The final hash is the
 `9c9704b7`.
+
+### 2026-08-26 runtime correspondence validation
+
+Recorded the verified Docker 29.6.2 host and official v0.23.0 A5 image digest,
+proved that the image Git base is the branch's exact `v0.23.0` merge base, and
+matched all three bind-mounted runtime files by SHA-256. Re-ran the six
+CatCCOS unit tests and a 320-token real-model request that crosses the CatCCOS
+threshold. Documented the important limitation that changes outside the three
+mounted files require another mount or a complete image rebuild.

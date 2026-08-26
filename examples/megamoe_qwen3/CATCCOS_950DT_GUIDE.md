@@ -214,7 +214,78 @@ bash examples/megamoe_qwen3/benchmark.sh
 Then run the GSM8K accuracy gate before collecting performance data. Follow
 [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) exactly for both native and CatCCOS.
 
-## 7. Correctness-first environment switches
+## 7. Verified `a5new` reference environment
+
+The following single-NPU configuration was revalidated on 2026-08-26:
+
+| Item | Verified value |
+|---|---|
+| vLLM-Ascend branch | `codex/megamoe-vllm-v023@a2fa5c2b` |
+| vLLM-Ascend base | `v0.23.0@5cb98caa` |
+| Docker client/server | 29.6.2, API 1.55 |
+| Host | Ubuntu 24.04.4 LTS, kernel 6.8.0-136-generic |
+| Storage/cgroup | overlayfs, systemd, cgroup v2 |
+| Image | `quay.io/ascend/vllm-ascend:v0.23.0-a5` |
+| Image digest | `sha256:cc57064f119054904dc81360cd1105d211fa9b91bf726486926dd025c26f17b7` |
+| vLLM-Ascend package | 0.23.0 |
+| PyTorch/TorchNPU | 2.10.0+cpu / 2.10.0.post4 |
+
+The image contains the exact `v0.23.0` Git commit `5cb98caa`. CatCCOS mode
+does not rebuild the whole branch into the image. It bind-mounts these three
+runtime files from the checkout:
+
+```text
+vllm_ascend/__init__.py
+vllm_ascend/envs.py
+vllm_ascend/catccos_patch.py
+```
+
+On `a5new`, the host and container SHA-256 values were identical:
+
+| File | SHA-256 |
+|---|---|
+| `__init__.py` | `e6505ce2562054f74df176c35cee2f3da64a8acef524c1741265a6160f4dea29` |
+| `envs.py` | `b6a5c5a420b31465dfc793bf3a7d9cee0f989daff4a6bd1536a2bb033aa93251` |
+| `catccos_patch.py` | `e9384577a9c7a38b4ec1efb584e1d501ef4ed41fd473bc0b0bf424311942076b` |
+
+Recheck the relationship after every source update:
+
+```bash
+git rev-parse HEAD
+git merge-base HEAD v0.23.0
+
+docker exec megamoe-catccos \
+  git -C /vllm-workspace/vllm-ascend rev-parse HEAD
+
+sha256sum \
+  vllm_ascend/__init__.py \
+  vllm_ascend/envs.py \
+  vllm_ascend/catccos_patch.py
+
+docker exec megamoe-catccos sha256sum \
+  /vllm-workspace/vllm-ascend/vllm_ascend/__init__.py \
+  /vllm-workspace/vllm-ascend/vllm_ascend/envs.py \
+  /vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py
+```
+
+The branch unit test passed with six tests. The isolated test container needs
+the Ascend driver mounts and `TORCH_DEVICE_BACKEND_AUTOLOAD=0`; without that
+variable, Torch backend auto-loading fails during test collection before any
+CatCCOS test runs.
+
+The real-model smoke used 320 prompt tokens, exceeding the default
+`CATCCOS_MINM=64` threshold, and returned HTTP 200 with the correct answer
+`42`. The serving container remained running with restart count zero and no
+new error or traceback in the ten-minute validation window. This is a
+single-NPU functional check, not a performance result or multi-NPU accuracy
+acceptance result.
+
+This source-to-container correspondence remains valid only while runtime
+changes are limited to the three mounted files. If future development changes
+any other `vllm_ascend` source file, extend `run_docker.sh` to mount it or build
+a new image from the complete branch before testing.
+
+## 8. Correctness-first environment switches
 
 The launcher defaults are suitable for initial correctness testing:
 
@@ -230,7 +301,7 @@ For exact parity with the CatCCOS data generator, repeat the accuracy run with
 `CATCCOS_SYNC_DEVICE=0` only after native/CatCCOS accuracy parity has passed;
 otherwise asynchronous failures can be attributed to the wrong layer.
 
-## 8. Troubleshooting
+## 9. Troubleshooting
 
 - `RootInfoDetect failed` or HCCL error code 4: the 950 D2D topology is absent
   or invalid. Regenerate it on the target server.

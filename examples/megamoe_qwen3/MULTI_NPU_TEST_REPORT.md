@@ -16,7 +16,7 @@
 
 | 项目 | 版本 |
 |---|---|
-| vLLM-Ascend | GitHub `codex/megamoe-vllm`，至少包含 `2a80c511` |
+| vLLM-Ascend | GitHub `codex/megamoe-vllm-v023`，至少包含 `9c9704b7` |
 | CatCCOS | GitHub/GitCode `codex/megamoe-vllm`，`9cdc8985` |
 | Docker image | `quay.io/ascend/vllm-ascend:v0.23.0-a5` |
 | Model | `Qwen/Qwen3-30B-A3B`，本地 BF16 checkpoint |
@@ -39,7 +39,7 @@ docker image inspect quay.io/ascend/vllm-ascend:v0.23.0-a5 \
 ```bash
 mkdir -p /data/src
 
-git clone --branch codex/megamoe-vllm \
+git clone --branch codex/megamoe-vllm-v023 \
   https://github.com/WanhaoZhang/vllm-ascend.git \
   /data/src/vllm-ascend
 
@@ -51,7 +51,7 @@ git clone --branch codex/megamoe-vllm --recurse-submodules \
 已有仓库只允许 fast-forward 更新，避免覆盖机器上的本地修改：
 
 ```bash
-git -C /data/src/vllm-ascend switch codex/megamoe-vllm
+git -C /data/src/vllm-ascend switch codex/megamoe-vllm-v023
 git -C /data/src/vllm-ascend pull --ff-only
 
 git -C /data/src/catccos switch codex/megamoe-vllm

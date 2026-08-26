@@ -5,7 +5,7 @@ already has a working Ascend 950 host driver, Docker, and D2D topology. It uses
 two source repositories and the official vLLM-Ascend 0.23.0 A5 image:
 
 - vLLM-Ascend integration and launch scripts:
-  `WanhaoZhang/vllm-ascend`, branch `codex/megamoe-vllm`
+  `WanhaoZhang/vllm-ascend`, branch `codex/megamoe-vllm-v023`
 - CatCCOS operator and PyTorch extension:
   `zhangwanhao/catccos`, branch `codex/megamoe-vllm`
 
@@ -40,7 +40,7 @@ New checkout:
 ```bash
 mkdir -p /data/src
 
-git clone --branch codex/megamoe-vllm \
+git clone --branch codex/megamoe-vllm-v023 \
   https://github.com/WanhaoZhang/vllm-ascend.git \
   /data/src/vllm-ascend
 
@@ -52,7 +52,7 @@ git clone --branch codex/megamoe-vllm --recurse-submodules \
 Update an existing checkout without discarding local work:
 
 ```bash
-git -C /data/src/vllm-ascend switch codex/megamoe-vllm
+git -C /data/src/vllm-ascend switch codex/megamoe-vllm-v023
 git -C /data/src/vllm-ascend pull --ff-only
 
 git -C /data/src/catccos switch codex/megamoe-vllm

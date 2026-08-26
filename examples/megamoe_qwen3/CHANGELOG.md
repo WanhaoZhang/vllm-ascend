@@ -2,17 +2,18 @@
 
 This ledger explains the integration history so that a server checkout can be
 matched to the behavior being evaluated. Hashes are from the
+vLLM-Ascend `codex/megamoe-vllm-v023` and CatCCOS
 `codex/megamoe-vllm` branches unless stated otherwise.
 
 ## vLLM-Ascend repository
 
-### `b3a041aa7` — Qwen3 MoE Docker launcher
+### `d20d8714` — Qwen3 MoE Docker launcher
 
 Added `run_docker.sh`, `benchmark.sh`, and the initial Qwen3-30B-A3B deployment
 guide. The launcher validates selected NPU devices and requires generated
 HCCL/HiXLEP topology files before TP2/TP4 startup.
 
-### `be61c2916` — experimental CatCCOS A5 backend
+### `393930f5` — experimental CatCCOS A5 backend
 
 Added opt-in environment variables and a patch for the vLLM-Ascend 0.23.0
 `AscendFusedMoE` path. It initializes CatCCOS per EP rank, converts BF16 expert
@@ -20,12 +21,12 @@ weights to MXFP8, invokes `ascend950_dispatch_ffn_combine`, and falls back to
 native MoE below the configured token threshold. Unit tests cover environment
 parsing, shape constraints, unsupported modes, and native fallback.
 
-### `724296219` — activation enum compatibility
+### `00063cd7` — activation enum compatibility
 
 Accepted both the string `"silu"` and the vLLM activation enum used by the
 real Qwen3 MoE layer. This fixed model startup after the initial integration.
 
-### `826e9a360` — direct-launch input synchronization
+### `41cb5348` — direct-launch input synchronization
 
 Added an explicit NPU synchronization before the CatCCOS direct CCEC launch
 and retained route tensors through the operator call. Optional post-launch
@@ -56,7 +57,7 @@ the operator can be separated from TP/EP and topology issues.
 
 ## Current documentation and evaluation work
 
-### `2a80c511` — reproducible deployment and AISBench hand-off
+### `6cc1222a` — reproducible deployment and AISBench hand-off
 
 Made `run_docker.sh` select `MODE=native` or
 `MODE=catccos`, adds reproducible 950DT hand-off instructions, provides an
@@ -67,4 +68,4 @@ single-NPU smoke results.
 
 Added a Chinese TP2/TP4 execution report and recorded the intentionally
 stopped 185-sample common-prefix accuracy comparison. The final hash is the
-commit following `2a80c511` in this branch.
+`9c9704b7`.

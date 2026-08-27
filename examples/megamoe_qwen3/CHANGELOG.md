@@ -29,9 +29,10 @@ real Qwen3 MoE layer. This fixed model startup after the initial integration.
 ### `41cb5348` — direct-launch input synchronization
 
 Added an explicit NPU synchronization before the CatCCOS direct CCEC launch
-and retained route tensors through the operator call. Optional post-launch
-synchronization remains enabled by default. This fixed a reproducible
-single-NPU invalid-device-pointer failure in the direct launcher.
+and retained route tensors through the operator call. The later decode-path
+validation made post-launch synchronization unconditional after disabling it
+invalidated vLLM memory profiling. This fixed a reproducible single-NPU
+invalid-device-pointer failure in the direct launcher.
 
 It does not prove that the previously observed EP4 GSM8K accuracy regression
 is fixed; that requires the A/B evaluation documented in
@@ -78,3 +79,19 @@ matched all three bind-mounted runtime files by SHA-256. Re-ran the six
 CatCCOS unit tests and a 320-token real-model request that crosses the CatCCOS
 threshold. Documented the important limitation that changes outside the three
 mounted files require another mount or a complete image rebuild.
+
+### 2026-08-27 single-token decode validation
+
+Removed the unexplained single-NPU M=64 default so single-token decode can
+exercise CatCCOS by default. Multi-NPU launch remains conservatively gated at
+M=64 until TP2/TP4 decode acceptance. Added explicit prefill/decode path logs,
+threshold validation, and unit coverage for M=1 dispatch.
+
+The launcher now bind-mounts only the three runtime patch files instead of
+covering the image's complete `vllm-ascend` tree and hiding generated package
+metadata. Synchronization around the direct CatCCOS launch is mandatory after
+an A/B run showed that disabling it invalidates vLLM memory profiling.
+
+Standalone single-rank M=64 followed by ten M=1 calls passed with stable
+output. Formal vLLM logs proved M=1 dispatch, while the end-to-end request
+timed out and remains an open correctness and latency gate.

@@ -172,7 +172,15 @@ def _get_or_build_weight_cache(layer) -> dict[str, torch.Tensor]:
 
 def _should_use_native_path(layer, hidden_states: torch.Tensor, return_with_event: bool) -> bool:
     token_count = hidden_states.numel() // hidden_states.shape[-1]
-    if token_count < envs_ascend.VLLM_ASCEND_CATCCOS_MINM:
+    minimum_token_count = envs_ascend.VLLM_ASCEND_CATCCOS_MINM
+    if minimum_token_count < 1:
+        raise ValueError("VLLM_ASCEND_CATCCOS_MINM must be a positive integer")
+    if token_count < minimum_token_count:
+        logger.warning_once(
+            "CatCCOS A5 is using native MoE below the configured token-row threshold: M=%d, minimum=%d",
+            token_count,
+            minimum_token_count,
+        )
         return True
     if return_with_event or getattr(layer, "_shared_experts", None) is not None:
         logger.warning_once("CatCCOS A5 does not yet support the shared-expert event path; using native MoE")
@@ -184,6 +192,10 @@ def _should_use_native_path(layer, hidden_states: torch.Tensor, return_with_even
     activation = getattr(layer, "activation", "silu")
     if getattr(activation, "value", activation) != "silu":
         raise ValueError(f"CatCCOS A5 requires SiLU activation, got {activation}")
+    if token_count == 1:
+        logger.info_once("Executing CatCCOS A5 single-token decode path")
+    else:
+        logger.info_once("Executing CatCCOS A5 multi-token path with M=%d", token_count)
     return False
 
 
@@ -236,8 +248,7 @@ def _catccos_forward_impl(
         cache["w2"],
         cache["w2_scale"],
     )
-    if envs_ascend.VLLM_ASCEND_CATCCOS_SYNC_DEVICE:
-        torch.npu.synchronize()
+    torch.npu.synchronize()
     return output.reshape(original_shape)
 
 

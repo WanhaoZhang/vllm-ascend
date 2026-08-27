@@ -37,9 +37,10 @@
 - 镜像内 Git HEAD 正是 `v0.23.0@5cb98caa`；分支的 `__init__.py`、
   `envs.py` 和 `catccos_patch.py` 通过 bind mount 覆盖镜像文件，
   宿主机与容器内 SHA-256 逐文件一致。
-- `tests/ut/test_catccos_a5.py` 结果为 6 passed。320-token 真实
-  请求超过 `CATCCOS_MINM=64` 并返回 HTTP 200/正确答案 `42`；
-  容器 restart count 为 0，本轮日志无新 ERROR/Traceback。
+- 320-token 真实请求超过当时的 `CATCCOS_MINM=64` 并返回 HTTP
+  200/正确答案 `42`；容器 restart count 为 0，本轮日志无新
+  ERROR/Traceback。该配置的单 token decode 会回退原生路径，因此这个
+  结果只证明 CatCCOS prefill，不证明 CatCCOS decode。
 
 这是“官方 v0.23.0 镜像 + 三个运行时补丁文件 + CatCCOS 动态库”
 的组合，不是把整个分支重新构建成镜像。后续若修改其他
@@ -169,7 +170,7 @@ GPU_MEMORY_UTILIZATION=0.80 \
 VLLM_ASCEND_SOURCE=/data/src/vllm-ascend \
 CATCCOS_SOURCE=/data/src/catccos \
 CATCCOS_IPPORT=tcp://127.0.0.1:27021 \
-CATCCOS_SYNC_DEVICE=1 \
+CATCCOS_MINM=1 \
 bash examples/megamoe_qwen3/run_docker.sh
 ```
 
@@ -253,7 +254,14 @@ AISBench 结果默认位于：
 
 CatCCOS 相对 native 为 +1.62 个百分点，185 条中有 151 条提取后的最终答案一致。
 该作业由用户主动停止，因此不是完整 GSM8K 分数。它只说明单卡没有观察到类似历史
-EP4 报告中的大幅精度下降，不能替代 TP2/TP4 完整验证。
+EP4 报告中的大幅精度下降，不能替代 TP2/TP4 完整验证。该评测运行时
+`CATCCOS_MINM=64`，生成阶段通常是 M=1，所以它也不能作为 CatCCOS decode
+精度证据。
+
+2026-08-27 在 `a5new` 单卡补充验证：同一进程先运行 M=64，再连续运行十次
+M=1，算子均完成且十次 M=1 输出逐 bit 一致；正式 vLLM 服务日志也确认真实请求
+进入了 M=1 CatCCOS 路径。但该请求未在 180 秒诊断超时内返回，因此完整 decode
+输出和时延仍是待验收项。
 
 ## 10. 出现多卡精度回退时
 
@@ -262,7 +270,8 @@ EP4 报告中的大幅精度下降，不能替代 TP2/TP4 完整验证。
 1. 保留失败 run 的 predictions、所有 rank 日志、环境变量、commit 和镜像 digest。
 2. 用同一批差异样本从 TP4 降到 TP2，再降到 TP1。
 3. 将 `CATCCOS_WEIGHT_QUANT_BACKEND=cpu` 重跑差异样本，区分权重量化差异。
-4. 保持 `CATCCOS_SYNC_DEVICE=1`，不要在定位阶段关闭同步。
+4. 保持接入层调用前后的强制同步；直发算子尚未接入 TorchNPU 的 stream
+   dependency tracking，当前不能关闭同步。
 5. 在相同 rank size 上重跑 standalone 算子。
 6. 对照 `/lib/route.conf`、`/etc/hccl_rootinfo.json` 和 `/etc/hixlep`，确认没有
    使用其他机器的 topology。
@@ -273,5 +282,7 @@ EP4 报告中的大幅精度下降，不能替代 TP2/TP4 完整验证。
 [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) 的 streaming performance 步骤测试
 TTFT、TPOT 和 throughput。单卡 performance 不作为该多卡算子收益的验收依据。
 
-还需注意：默认 `CATCCOS_MINM=64` 时，小于 64 token rows 的 MoE 调用会回退到
-原生路径。评测报告必须保留该值，并区分“服务整体性能”和“融合算子实际覆盖率”。
+还需注意：单卡默认 `CATCCOS_MINM=1`，prefill 和 decode 都会进入 CatCCOS；
+多卡在正式验收前默认保守值 64。多卡 decode 验收必须显式设置
+`CATCCOS_MINM=1`，并在日志中确认 single-token decode 消息。评测报告必须保留
+该值，并区分“服务整体性能”和“融合算子实际覆盖率”。

@@ -63,6 +63,11 @@ The CatCCOS extension must already exist at
 `$CATCCOS_SOURCE/build_torch_a5/lib/libcatccos_torch.so`. See the 950DT guide
 for the reproducible build command.
 
+The single-NPU launcher defaults `CATCCOS_MINM` to `1`, so both prefill and
+single-token decode use CatCCOS. Multi-NPU runs retain the conservative value
+`64` until TP2/TP4 decode correctness is accepted; set `CATCCOS_MINM=1`
+explicitly when running that gate.
+
 For two or four NPUs, change `NPU_DEVICES` to `0,1` or `0,1,2,3`. The launcher
 automatically sets tensor parallel size and enables expert parallelism. It
 also refuses to start multi-NPU mode if the host topology files are absent.
@@ -89,20 +94,31 @@ path:
 
 ```bash
 docker logs megamoe-catccos 2>&1 | grep -E \
-  'Enabled CatCCOS|Initialized CatCCOS|Converted CatCCOS'
+  'Enabled CatCCOS|Initialized CatCCOS|Converted CatCCOS|Executing CatCCOS'
 ```
+
+For a decode-path check, require both a multi-token message and
+`Executing CatCCOS A5 single-token decode path`. A healthy endpoint alone
+does not prove that decode used CatCCOS.
 
 ## Scope and known risk
 
 The backend accepts unquantized BF16 MoE layers with SiLU activation. Batches
-with fewer than `VLLM_ASCEND_CATCCOS_MINM` tokens use the native path. Dynamic
-EPLB, quantized model weights, and the shared-expert event path are not
-supported by this prototype.
+with fewer than `VLLM_ASCEND_CATCCOS_MINM` token rows use the native path.
+Dynamic EPLB, quantized model weights, and the shared-expert event path are
+not supported by this prototype. The direct CatCCOS launcher is outside the
+TorchNPU dependency scheduler, so synchronization before and after every MoE
+call is mandatory in this correctness-first integration.
 
-Single-NPU serving and numerical smoke tests have passed. Multi-NPU startup
-cannot be validated on a host without the generated 950 D2D topology. A prior
-EP4 run also showed a large GSM8K accuracy regression. The synchronization
-fix in this branch addresses direct-launch input readiness, but it is not
-evidence that the cross-rank accuracy issue is resolved. Always run the
-native/CatCCOS A/B procedure in [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) before
-using multi-NPU performance numbers.
+On `a5new`, a standalone single-rank replay passed after one M=64 call and ten
+consecutive M=1 calls with bitwise-stable output. A real vLLM request also
+logged both the multi-token prefill path and the M=1 decode path. That request
+did not finish within the diagnostic timeout, so end-to-end CatCCOS decode
+accuracy is not yet accepted. The earlier 185-sample result used the default
+threshold 64 and therefore mostly measured CatCCOS prefill plus native decode.
+
+Multi-NPU startup cannot be validated on a host without generated 950 D2D
+topology. A prior EP4 run also showed a large GSM8K accuracy regression.
+Always run the fixed-prompt native/CatCCOS comparison first, followed by the
+full A/B procedure in [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md), before using
+accuracy or performance numbers.

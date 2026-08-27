@@ -192,12 +192,13 @@ number of devices and enables expert parallelism in multi-NPU mode.
 curl -fsS http://127.0.0.1:18081/health
 
 docker logs megamoe-catccos-tp4 2>&1 | grep -E \
-  'Enabled CatCCOS|Initialized CatCCOS|Converted CatCCOS'
+  'Enabled CatCCOS|Initialized CatCCOS|Converted CatCCOS|Executing CatCCOS'
 ```
 
 Expected CatCCOS messages include one enable message and initialization for
-every EP rank. Absence of these messages means the result is not a CatCCOS
-measurement.
+every EP rank. A decode validation must additionally contain
+`Executing CatCCOS A5 single-token decode path`. Absence of that message means
+the generated-token MoE calls may still be using the native path.
 
 Run a deterministic serving smoke test:
 
@@ -211,12 +212,22 @@ MAX_CONCURRENCY=4 \
 bash examples/megamoe_qwen3/benchmark.sh
 ```
 
+For a fixed-prompt decode diagnosis, run the native and CatCCOS services
+sequentially on the same physical NPU. Keep the request JSON identical and
+set `temperature=0`. First request `max_tokens=1`, which checks the token
+sampled from prefill logits. Then request `max_tokens=2`; producing the second
+token requires one M=1 decode step. The CatCCOS service must be started with
+`CATCCOS_MINM=1`, and its log must contain the single-token decode message.
+If the one-token outputs match but the second token first differs, the fault
+boundary is the decode step rather than prompt tokenization or prefill.
+
 Then run the GSM8K accuracy gate before collecting performance data. Follow
 [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) exactly for both native and CatCCOS.
 
 ## 7. Verified `a5new` reference environment
 
-The following single-NPU configuration was revalidated on 2026-08-26:
+The following single-NPU configuration was revalidated on 2026-08-26 and the
+decode path was examined again on 2026-08-27:
 
 | Item | Verified value |
 |---|---|
@@ -268,17 +279,24 @@ docker exec megamoe-catccos sha256sum \
   /vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py
 ```
 
-The branch unit test passed with six tests. The isolated test container needs
+The isolated unit test container needs
 the Ascend driver mounts and `TORCH_DEVICE_BACKEND_AUTOLOAD=0`; without that
 variable, Torch backend auto-loading fails during test collection before any
 CatCCOS test runs.
 
-The real-model smoke used 320 prompt tokens, exceeding the default
-`CATCCOS_MINM=64` threshold, and returned HTTP 200 with the correct answer
-`42`. The serving container remained running with restart count zero and no
-new error or traceback in the ten-minute validation window. This is a
-single-NPU functional check, not a performance result or multi-NPU accuracy
-acceptance result.
+The 2026-08-26 real-model smoke used 320 prompt tokens, exceeded the then
+default `CATCCOS_MINM=64`, and returned HTTP 200 with answer `42`. Because
+single-token decode was below that threshold, this proved CatCCOS prefill but
+did not prove CatCCOS decode.
+
+On 2026-08-27, a single-rank standalone replay ran M=64 once followed by M=1
+ten times in the same process. All calls completed and all ten M=1 outputs
+were bitwise identical. With `CATCCOS_MINM=1`, the official v0.23.0 service
+then logged a real multi-token request and
+`Executing CatCCOS A5 single-token decode path`, proving formal vLLM dispatch
+coverage. The request did not return within 180 seconds, and repeated model
+starts later encountered shared-host pinned-memory exhaustion. Treat decode
+latency and end-to-end output parity as open gates, not passed results.
 
 This source-to-container correspondence remains valid only while runtime
 changes are limited to the three mounted files. If future development changes
@@ -291,15 +309,16 @@ The launcher defaults are suitable for initial correctness testing:
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `CATCCOS_MINM` | `64` | Smaller batches fall back to native MoE. |
+| `CATCCOS_MINM` | single NPU: `1`; multi-NPU: `64` | Smaller batches fall back to native MoE. |
 | `CATCCOS_WEIGHT_QUANT_BACKEND` | `npu` | Converts BF16 expert weights to MXFP8 on NPU. |
-| `CATCCOS_SYNC_DEVICE` | `1` | Surfaces asynchronous custom-kernel errors at the MoE call. |
 | `CATCCOS_MEM` | `1073741824` | Symmetric memory passed to CatCCOS initialization. |
 
 For exact parity with the CatCCOS data generator, repeat the accuracy run with
-`CATCCOS_WEIGHT_QUANT_BACKEND=cpu`. This is slower at startup. Set
-`CATCCOS_SYNC_DEVICE=0` only after native/CatCCOS accuracy parity has passed;
-otherwise asynchronous failures can be attributed to the wrong layer.
+`CATCCOS_WEIGHT_QUANT_BACKEND=cpu`. This is slower at startup. Synchronization
+around the direct CatCCOS launch is unconditional: an `a5new` A/B run without
+post-launch synchronization produced invalid vLLM memory-profile accounting.
+Do not remove it as a performance experiment without first integrating the
+launcher into TorchNPU stream dependency tracking.
 
 ## 9. Troubleshooting
 
@@ -315,3 +334,8 @@ otherwise asynchronous failures can be attributed to the wrong layer.
 - Accuracy differs strongly from native: stop performance testing, retain the
   AISBench predictions and all rank logs, repeat with CPU weight quantization,
   and reduce to single NPU to separate quantization from cross-rank behavior.
+- Request logs contain prefill but no single-token decode message: set
+  `CATCCOS_MINM=1`, restart the service, and repeat the fixed prompt.
+- `aclrtMallocHostWithCfg` reports 207001: this is shared-host pinned-memory
+  exhaustion. Stop only your own stale containers or move to an idle host;
+  changing the CatCCOS token threshold does not fix it.

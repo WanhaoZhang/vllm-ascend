@@ -45,6 +45,31 @@ class TestCatccosA5(TestCase):
             layer._shared_experts = object()
             self.assertTrue(_should_use_native_path(layer, torch.empty(64, 2048), False))
 
+    def test_single_token_uses_catccos_when_threshold_is_one(self):
+        layer = SimpleNamespace(
+            _shared_experts=None,
+            dynamic_eplb=False,
+            quant_config=None,
+            activation="silu",
+        )
+
+        with mock.patch.dict(os.environ, {"VLLM_ASCEND_CATCCOS_MINM": "1"}):
+            self.assertFalse(_should_use_native_path(layer, torch.empty(1, 2048), False))
+
+    def test_rejects_non_positive_token_threshold(self):
+        layer = SimpleNamespace(
+            _shared_experts=None,
+            dynamic_eplb=False,
+            quant_config=None,
+            activation="silu",
+        )
+
+        with (
+            mock.patch.dict(os.environ, {"VLLM_ASCEND_CATCCOS_MINM": "0"}),
+            self.assertRaisesRegex(ValueError, "positive integer"),
+        ):
+            _should_use_native_path(layer, torch.empty(1, 2048), False)
+
     def test_rejects_dynamic_eplb(self):
         layer = SimpleNamespace(
             _shared_experts=None,

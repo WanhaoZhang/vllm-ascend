@@ -20,9 +20,8 @@ VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE:-}"
 CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
-CATCCOS_MINM="${CATCCOS_MINM:-64}"
+CATCCOS_MINM="${CATCCOS_MINM:-}"
 CATCCOS_WEIGHT_QUANT_BACKEND="${CATCCOS_WEIGHT_QUANT_BACKEND:-npu}"
-CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-1}"
 
 usage() {
     cat <<'EOF'
@@ -43,7 +42,8 @@ Optional environment variables:
 CatCCOS mode:
   VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
   CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MINM,
-  CATCCOS_WEIGHT_QUANT_BACKEND (npu or cpu), and CATCCOS_SYNC_DEVICE (0 or 1).
+  and CATCCOS_WEIGHT_QUANT_BACKEND (npu or cpu).
+  CATCCOS_MINM defaults to 1 for one NPU and 64 for multi-NPU runs.
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing
@@ -77,15 +77,17 @@ case "${MODE}" in
         [[ -d "${CATCCOS_SOURCE}" ]] || {
             fail "CATCCOS_SOURCE is required in catccos mode"
         }
+        for runtime_file in __init__.py envs.py catccos_patch.py; do
+            [[ -f "${VLLM_ASCEND_SOURCE}/vllm_ascend/${runtime_file}" ]] || {
+                fail "vLLM-Ascend runtime file is missing: ${runtime_file}"
+            }
+        done
         catccos_library="${CATCCOS_SOURCE}/build_torch_a5/lib/libcatccos_torch.so"
         [[ -f "${catccos_library}" ]] || {
             fail "CatCCOS extension is missing: ${catccos_library}"
         }
         [[ "${CATCCOS_WEIGHT_QUANT_BACKEND}" =~ ^(npu|cpu)$ ]] || {
             fail "CATCCOS_WEIGHT_QUANT_BACKEND must be npu or cpu"
-        }
-        [[ "${CATCCOS_SYNC_DEVICE}" =~ ^[01]$ ]] || {
-            fail "CATCCOS_SYNC_DEVICE must be 0 or 1"
         }
         ;;
     *) fail "MODE must be native or catccos" ;;
@@ -110,6 +112,19 @@ for device_path in /dev/davinci_manager /dev/hisi_hdc; do
 done
 
 parallel_size="${#device_ids[@]}"
+if [[ "${MODE}" == "catccos" ]]; then
+    if [[ -z "${CATCCOS_MINM}" ]]; then
+        if (( parallel_size == 1 )); then
+            CATCCOS_MINM=1
+        else
+            CATCCOS_MINM=64
+        fi
+    fi
+    [[ "${CATCCOS_MINM}" =~ ^[1-9][0-9]*$ ]] || {
+        fail "CATCCOS_MINM must be a positive integer"
+    }
+fi
+
 topology_mounts=()
 if (( parallel_size > 1 )); then
     topology_paths=(/lib/route.conf /etc/hccl_rootinfo.json /etc/hixlep)
@@ -161,7 +176,9 @@ docker_env=()
 source_mounts=()
 if [[ "${MODE}" == "catccos" ]]; then
     source_mounts=(
-        -v "${VLLM_ASCEND_SOURCE}:/vllm-workspace/vllm-ascend:ro"
+        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/__init__.py:/vllm-workspace/vllm-ascend/vllm_ascend/__init__.py:ro"
+        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/envs.py:/vllm-workspace/vllm-ascend/vllm_ascend/envs.py:ro"
+        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/catccos_patch.py:/vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py:ro"
         -v "${CATCCOS_SOURCE}:/workspace/catccos:ro"
     )
     docker_env+=(
@@ -172,7 +189,6 @@ if [[ "${MODE}" == "catccos" ]]; then
         -e "VLLM_ASCEND_CATCCOS_MEM=${CATCCOS_MEM}"
         -e "VLLM_ASCEND_CATCCOS_MINM=${CATCCOS_MINM}"
         -e "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND=${CATCCOS_WEIGHT_QUANT_BACKEND}"
-        -e "VLLM_ASCEND_CATCCOS_SYNC_DEVICE=${CATCCOS_SYNC_DEVICE}"
         -e LD_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib:/workspace/catccos/3rdparty/shmem/install/shmem/lib
     )
 fi
@@ -202,6 +218,9 @@ fi
 echo "Starting ${CONTAINER_NAME} in ${MODE} mode with TP=${parallel_size}, EP=${enable_ep}"
 echo "Image: ${IMAGE}"
 echo "NPUs: ${NPU_DEVICES}"
+if [[ "${MODE}" == "catccos" ]]; then
+    echo "CatCCOS minimum token rows: ${CATCCOS_MINM}"
+fi
 
 docker run -d \
     --name "${CONTAINER_NAME}" \

@@ -25,6 +25,76 @@ The in-process native result is a comparison path, not an independent golden.
 Always validate the probe itself with repeated-backend and reversed-order
 runs before attributing a mismatch to CatCCOS.
 
+## Existing-container launch
+
+If the four-card machine already has a container with vLLM, vLLM-Ascend, the
+model, and CatCCOS installed, use `run_probe_in_container.sh`. Its defaults
+match the card 4-7, port 28001, CPU weight-quantization setup used for the
+known failing prompt.
+
+First make sure the vLLM-Ascend imported by the container is on
+`codex/megamoe-vllm-v023` commit `499c53661` or later. Then, inside the
+container:
+
+```bash
+cd /path/to/vllm-ascend
+export PROBE_RUN_ID=prompt177-20260827
+
+bash examples/megamoe_qwen3/run_probe_in_container.sh native-native
+```
+
+Wait for `/health`, send the fixed prompt once with `temperature=0` and
+`max_tokens=1`, then stop the foreground server with Ctrl-C. Restart it for
+each remaining order:
+
+```bash
+curl -fsS http://127.0.0.1:28001/health
+
+jq -n --rawfile prompt /path/to/fixed_bad_prompt.txt '
+  {
+    model: "qwen3-catccos",
+    messages: [{role: "user", content: $prompt}],
+    temperature: 0,
+    max_tokens: 1,
+    stream: false
+  }
+' | curl -fsS http://127.0.0.1:28001/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    --data-binary @-
+```
+
+Use the same request body that reproduced the problem if it differs from this
+chat-completions example. Exact tokenization matters: the probe only records
+calls whose M matches `PROBE_TOKEN_COUNTS`, which defaults to 177.
+To probe single-token decode later, set both `CATCCOS_MINM=1` and
+`PROBE_TOKEN_COUNTS=1`; the launcher rejects a selected M below `MINM` because
+that call would bypass CatCCOS.
+
+Then run the other three orders:
+
+```bash
+bash examples/megamoe_qwen3/run_probe_in_container.sh catccos-catccos
+bash examples/megamoe_qwen3/run_probe_in_container.sh native-catccos
+bash examples/megamoe_qwen3/run_probe_in_container.sh catccos-native
+```
+
+Do not send multiple requests to the same server for this experiment. The
+results are written under:
+
+```text
+/home/z00956592/catccos-probe-results/<PROBE_RUN_ID>/<order>/
+```
+
+Override paths only when they differ in the existing container:
+
+```bash
+MODEL_PATH=/other/model \
+CATCCOS_SOURCE=/other/catccos \
+CATCCOS_BUILD_DIR=/other/catccos/build \
+PROBE_OUTPUT_ROOT=/other/results \
+bash examples/megamoe_qwen3/run_probe_in_container.sh native-native
+```
+
 ## Four-card launch
 
 Use a new output directory for every run. Start with `native-native`:

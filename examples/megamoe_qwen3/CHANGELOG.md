@@ -109,3 +109,9 @@ metrics. The first output pair that crosses a configurable cosine or
 relative-L2 threshold is saved with its real hidden states, router logits,
 expert IDs, and gate weights. Full MXFP8 weight dumping is a separate
 high-cost option.
+
+Added an existing-container launcher matching the established card 4-7 and
+port 28001 A/B workflow. It supports the two normal service modes and all four
+probe orders, isolates each run's output directory, verifies that the active
+vLLM-Ascend import contains the probe, and rejects token counts that would be
+bypassed by `CATCCOS_MINM`.

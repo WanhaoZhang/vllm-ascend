@@ -22,6 +22,8 @@ The integration currently targets the official
 - [CHANGELOG.md](CHANGELOG.md): purpose and validation status of every commit
   in this integration branch.
 - `run_docker.sh`: launches either the native or CatCCOS service.
+- `run_probe_in_container.sh`: launches normal A/B or one of the four probe
+  orders from inside an existing four-card container.
 - `benchmark.sh`: runs a deterministic random-token serving benchmark.
 - `run_aisbench_gsm8k.sh`: runs the documented AISBench GSM8K job.
 

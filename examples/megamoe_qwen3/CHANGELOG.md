@@ -115,3 +115,8 @@ port 28001 A/B workflow. It supports the two normal service modes and all four
 probe orders, isolates each run's output directory, verifies that the active
 vLLM-Ascend import contains the probe, and rejects token counts that would be
 bypassed by `CATCCOS_MINM`.
+
+Expanded the existing-container documentation into a Chinese field runbook:
+M-window discovery, pre-request profile checks, all four cold-start orders,
+result completeness checks, JSONL and tensor-dump inspection, the diagnosis
+matrix, decode follow-up, and copying results out before container removal.

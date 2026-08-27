@@ -87,7 +87,7 @@ exercise CatCCOS by default. Multi-NPU launch remains conservatively gated at
 M=64 until TP2/TP4 decode acceptance. Added explicit prefill/decode path logs,
 threshold validation, and unit coverage for M=1 dispatch.
 
-The launcher now bind-mounts only the three runtime patch files instead of
+The launcher now bind-mounts only the runtime patch files instead of
 covering the image's complete `vllm-ascend` tree and hiding generated package
 metadata. Synchronization around the direct CatCCOS launch is mandatory after
 an A/B run showed that disabling it invalidates vLLM memory profiling.
@@ -95,3 +95,17 @@ an A/B run showed that disabling it invalidates vLLM memory profiling.
 Standalone single-rank M=64 followed by ten M=1 calls passed with stable
 output. Formal vLLM logs proved M=1 dispatch, while the end-to-end request
 timed out and remains an open correctness and latency gate.
+
+### Same-input four-order correctness probe
+
+Added an opt-in per-layer probe that runs independent input clones through
+native and CatCCOS MoE implementations in the same process. The first output
+is synchronized and cloned before the second call, preventing output aliasing
+from corrupting the comparison. Native/native, CatCCOS/CatCCOS, and both cross
+orders are supported to expose non-reentrancy and order-dependent state.
+
+Each rank writes JSONL summaries with tensor fingerprints and numerical
+metrics. The first output pair that crosses a configurable cosine or
+relative-L2 threshold is saved with its real hidden states, router logits,
+expert IDs, and gate weights. Full MXFP8 weight dumping is a separate
+high-cost option.

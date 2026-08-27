@@ -35,14 +35,14 @@
 - 运行镜像为 `quay.io/ascend/vllm-ascend:v0.23.0-a5`，digest 为
   `sha256:cc57064f119054904dc81360cd1105d211fa9b91bf726486926dd025c26f17b7`。
 - 镜像内 Git HEAD 正是 `v0.23.0@5cb98caa`；分支的 `__init__.py`、
-  `envs.py` 和 `catccos_patch.py` 通过 bind mount 覆盖镜像文件，
+  `envs.py`、`catccos_patch.py` 和 `catccos_debug.py` 通过 bind mount 覆盖镜像文件，
   宿主机与容器内 SHA-256 逐文件一致。
 - 320-token 真实请求超过当时的 `CATCCOS_MINM=64` 并返回 HTTP
   200/正确答案 `42`；容器 restart count 为 0，本轮日志无新
   ERROR/Traceback。该配置的单 token decode 会回退原生路径，因此这个
   结果只证明 CatCCOS prefill，不证明 CatCCOS decode。
 
-这是“官方 v0.23.0 镜像 + 三个运行时补丁文件 + CatCCOS 动态库”
+这是“官方 v0.23.0 镜像 + 四个运行时补丁文件 + CatCCOS 动态库”
 的组合，不是把整个分支重新构建成镜像。后续若修改其他
 `vllm_ascend` 源码，必须增加挂载或重新构建完整镜像，否则容器
 不会使用新修改。详细校验命令见

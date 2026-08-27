@@ -120,6 +120,36 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND": lambda: os.getenv(
         "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND", "npu"
     ).lower(),
+    # Optional same-input native/CatCCOS correctness probe. Empty directory
+    # disables it. Output contains no credentials but can contain model inputs.
+    "VLLM_ASCEND_CATCCOS_DEBUG_DIR": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_DIR", ""),
+    # Required when DEBUG_DIR is set. Comma-separated token-row counts, for
+    # example "177" for one fixed prompt or "1,177" for decode plus prefill.
+    "VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS", ""),
+    # Valid values: native-catccos, catccos-native, native-native,
+    # catccos-catccos. All ranks must use the same order.
+    "VLLM_ASCEND_CATCCOS_DEBUG_ORDER": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_ORDER", "native-catccos").lower(),
+    # Positive limit for each selected token count in each MoE layer.
+    "VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER": lambda: int(
+        os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER", "1")
+    ),
+    # [0, 1]. The first output pair below this cosine is dumped per rank.
+    "VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD": lambda: float(
+        os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD", "0.99")
+    ),
+    # The first output pair above this relative L2 error is dumped per rank.
+    "VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD": lambda: float(
+        os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD", "0.1")
+    ),
+    # Save inputs, routes, and frozen outputs for the first mismatch per rank.
+    "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS", "1"))
+    ),
+    # Also save the first mismatch's MXFP8 weights and scales. This can use
+    # several GiB across ranks, so it is disabled by default.
+    "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

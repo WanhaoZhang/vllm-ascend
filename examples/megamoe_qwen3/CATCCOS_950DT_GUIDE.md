@@ -223,6 +223,8 @@ boundary is the decode step rather than prompt tokenization or prefill.
 
 Then run the GSM8K accuracy gate before collecting performance data. Follow
 [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) exactly for both native and CatCCOS.
+For the fixed 177-token four-card failure, use the same-input and four-order
+procedure in [CATCCOS_PROBE.md](CATCCOS_PROBE.md) before a full evaluation.
 
 ## 7. Verified `a5new` reference environment
 
@@ -242,13 +244,14 @@ decode path was examined again on 2026-08-27:
 | PyTorch/TorchNPU | 2.10.0+cpu / 2.10.0.post4 |
 
 The image contains the exact `v0.23.0` Git commit `5cb98caa`. CatCCOS mode
-does not rebuild the whole branch into the image. It bind-mounts these three
-runtime files from the checkout:
+does not rebuild the whole branch into the image. It bind-mounts these runtime
+files from the checkout:
 
 ```text
 vllm_ascend/__init__.py
 vllm_ascend/envs.py
 vllm_ascend/catccos_patch.py
+vllm_ascend/catccos_debug.py
 ```
 
 On `a5new`, the host and container SHA-256 values were identical:
@@ -271,12 +274,14 @@ docker exec megamoe-catccos \
 sha256sum \
   vllm_ascend/__init__.py \
   vllm_ascend/envs.py \
-  vllm_ascend/catccos_patch.py
+  vllm_ascend/catccos_patch.py \
+  vllm_ascend/catccos_debug.py
 
 docker exec megamoe-catccos sha256sum \
   /vllm-workspace/vllm-ascend/vllm_ascend/__init__.py \
   /vllm-workspace/vllm-ascend/vllm_ascend/envs.py \
-  /vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py
+  /vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py \
+  /vllm-workspace/vllm-ascend/vllm_ascend/catccos_debug.py
 ```
 
 The isolated unit test container needs
@@ -299,7 +304,7 @@ starts later encountered shared-host pinned-memory exhaustion. Treat decode
 latency and end-to-end output parity as open gates, not passed results.
 
 This source-to-container correspondence remains valid only while runtime
-changes are limited to the three mounted files. If future development changes
+changes are limited to the four mounted files. If future development changes
 any other `vllm_ascend` source file, extend `run_docker.sh` to mount it or build
 a new image from the complete branch before testing.
 

@@ -8,8 +8,20 @@ MODEL_PATH="${MODEL_PATH:-/home/weights/Qwen3-30B-A3B-Instruct-2507}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3-catccos}"
 PORT="${PORT:-28001}"
 NPU_DEVICES="${NPU_DEVICES:-4,5,6,7}"
-CATCCOS_SOURCE="${CATCCOS_SOURCE:-/home/z00956592/catccos}"
-CATCCOS_BUILD_DIR="${CATCCOS_BUILD_DIR:-${CATCCOS_SOURCE}/build_codex}"
+if [[ -z "${CATCCOS_SOURCE:-}" ]]; then
+    if [[ -d /home/z00956592/catccos ]]; then
+        CATCCOS_SOURCE=/home/z00956592/catccos
+    else
+        CATCCOS_SOURCE=/workspace/catccos
+    fi
+fi
+if [[ -z "${CATCCOS_BUILD_DIR:-}" ]]; then
+    if [[ -f "${CATCCOS_SOURCE}/build_codex/lib/libcatccos_torch.so" ]]; then
+        CATCCOS_BUILD_DIR="${CATCCOS_SOURCE}/build_codex"
+    else
+        CATCCOS_BUILD_DIR="${CATCCOS_SOURCE}/build_torch_a5"
+    fi
+fi
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-2147483648}"
 CATCCOS_MINM="${CATCCOS_MINM:-64}"
@@ -17,10 +29,12 @@ CATCCOS_WEIGHT_QUANT_BACKEND="${CATCCOS_WEIGHT_QUANT_BACKEND:-cpu}"
 PROBE_OUTPUT_ROOT="${PROBE_OUTPUT_ROOT:-/home/z00956592/catccos-probe-results}"
 PROBE_RUN_ID="${PROBE_RUN_ID:-prompt177}"
 PROBE_TOKEN_COUNTS="${PROBE_TOKEN_COUNTS:-177}"
+PROBE_MOE_INSTANCE_IDS="${PROBE_MOE_INSTANCE_IDS:-}"
 PROBE_MAX_CALLS_PER_LAYER="${PROBE_MAX_CALLS_PER_LAYER:-1}"
 PROBE_COSINE_THRESHOLD="${PROBE_COSINE_THRESHOLD:-0.99}"
 PROBE_RELATIVE_L2_THRESHOLD="${PROBE_RELATIVE_L2_THRESHOLD:-0.1}"
 PROBE_DUMP_TENSORS="${PROBE_DUMP_TENSORS:-1}"
+PROBE_DUMP_SELECTED="${PROBE_DUMP_SELECTED:-0}"
 PROBE_DUMP_WEIGHTS="${PROBE_DUMP_WEIGHTS:-0}"
 
 usage() {
@@ -50,11 +64,13 @@ fail() {
 }
 unset VLLM_ASCEND_CATCCOS_DEBUG_DIR
 unset VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS
+unset VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS
 unset VLLM_ASCEND_CATCCOS_DEBUG_ORDER
 unset VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER
 unset VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD
 unset VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD
 unset VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS
+unset VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED
 unset VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS
 
 probe_order=""
@@ -108,6 +124,9 @@ if [[ -n "${probe_order}" ]]; then
     [[ "${PROBE_TOKEN_COUNTS}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
         fail "PROBE_TOKEN_COUNTS must contain positive comma-separated integers"
     }
+    [[ -z "${PROBE_MOE_INSTANCE_IDS}" || "${PROBE_MOE_INSTANCE_IDS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
+        fail "PROBE_MOE_INSTANCE_IDS must contain non-negative comma-separated integers"
+    }
     [[ "${PROBE_MAX_CALLS_PER_LAYER}" =~ ^[1-9][0-9]*$ ]] || {
         fail "PROBE_MAX_CALLS_PER_LAYER must be positive"
     }
@@ -118,6 +137,7 @@ if [[ -n "${probe_order}" ]]; then
         fail "PROBE_RELATIVE_L2_THRESHOLD must be positive"
     }
     [[ "${PROBE_DUMP_TENSORS}" =~ ^[01]$ ]] || fail "PROBE_DUMP_TENSORS must be 0 or 1"
+    [[ "${PROBE_DUMP_SELECTED}" =~ ^[01]$ ]] || fail "PROBE_DUMP_SELECTED must be 0 or 1"
     [[ "${PROBE_DUMP_WEIGHTS}" =~ ^[01]$ ]] || fail "PROBE_DUMP_WEIGHTS must be 0 or 1"
     IFS=',' read -r -a probe_token_counts <<<"${PROBE_TOKEN_COUNTS}"
     for token_count in "${probe_token_counts[@]}"; do
@@ -144,11 +164,13 @@ print(debug.__file__)
 
     export VLLM_ASCEND_CATCCOS_DEBUG_DIR="${probe_output_dir}"
     export VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS="${PROBE_TOKEN_COUNTS}"
+    export VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS="${PROBE_MOE_INSTANCE_IDS}"
     export VLLM_ASCEND_CATCCOS_DEBUG_ORDER="${probe_order}"
     export VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER="${PROBE_MAX_CALLS_PER_LAYER}"
     export VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD="${PROBE_COSINE_THRESHOLD}"
     export VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD="${PROBE_RELATIVE_L2_THRESHOLD}"
     export VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS="${PROBE_DUMP_TENSORS}"
+    export VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED="${PROBE_DUMP_SELECTED}"
     export VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS="${PROBE_DUMP_WEIGHTS}"
 
     echo "[serve-probe] probe module=${probe_module}"

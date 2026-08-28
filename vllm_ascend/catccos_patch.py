@@ -279,6 +279,41 @@ def _run_probe_backend(
     return frozen
 
 
+def _apply_probe_outer_reduction(output: torch.Tensor) -> torch.Tensor:
+    """Apply the exact outer MoERunner reduction to a disposable clone."""
+    reduced = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(output.detach().clone())
+    if not isinstance(reduced, torch.Tensor):
+        raise TypeError(f"CatCCOS probe expected a tensor after outer reduction, got {type(reduced)}")
+    torch.npu.synchronize()
+    frozen = reduced.detach().clone()
+    torch.npu.synchronize()
+    return frozen
+
+
+def _probe_parallel_metadata() -> dict[str, Any]:
+    from vllm.distributed import (
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+    )
+
+    from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, get_mc2_tokens_capacity
+
+    moe_comm_type = _EXTRA_CTX.moe_comm_type
+    flash_comm_v1_enabled = bool(_EXTRA_CTX.flash_comm_v1_enabled)
+    outer_reduction_is_identity = (
+        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
+        or flash_comm_v1_enabled
+    )
+    return {
+        "moe_comm_type": moe_comm_type.name if moe_comm_type is not None else None,
+        "flash_comm_v1_enabled": flash_comm_v1_enabled,
+        "outer_reduction": "identity" if outer_reduction_is_identity else "tp-all-reduce",
+        "tp_rank": get_tensor_model_parallel_rank(),
+        "tp_world_size": get_tensor_model_parallel_world_size(),
+        "mc2_tokens_capacity": get_mc2_tokens_capacity(),
+    }
+
+
 def _run_catccos_probe(
     layer,
     hidden_states: torch.Tensor,
@@ -319,7 +354,47 @@ def _run_catccos_probe(
         gate_weight,
         cache,
     )
+    # Use the same custom op as MoERunner._maybe_reduce_final_output on clones.
+    # Every rank executes these collectives in the same order. The actual
+    # output returned below is untouched and still receives its normal outer
+    # reduction after AscendFusedMoE.forward_impl returns.
+    first_post_reduce = _apply_probe_outer_reduction(first_output)
+    second_post_reduce = _apply_probe_outer_reduction(second_output)
+
     metrics = compare_tensors(first_output, second_output)
+    post_reduce_metrics = compare_tensors(first_post_reduce, second_post_reduce)
+
+    stage_tensors: dict[str, torch.Tensor] = {}
+    for backend, pre_reduce, post_reduce in (
+        (first_backend, first_output, first_post_reduce),
+        (second_backend, second_output, second_post_reduce),
+    ):
+        if backend == "native":
+            stage_tensors.setdefault("native_local", pre_reduce)
+            stage_tensors.setdefault("native_reduced", post_reduce)
+        else:
+            stage_tensors.setdefault("catccos_pre_reduce", pre_reduce)
+            stage_tensors.setdefault("catccos_post_reduce", post_reduce)
+
+    stage_metrics: dict[str, dict[str, Any]] = {}
+    if "native_local" in stage_tensors:
+        stage_metrics["native_local_vs_native_reduced"] = compare_tensors(
+            stage_tensors["native_local"], stage_tensors["native_reduced"]
+        )
+    if "catccos_pre_reduce" in stage_tensors:
+        stage_metrics["catccos_pre_reduce_vs_catccos_post_reduce"] = compare_tensors(
+            stage_tensors["catccos_pre_reduce"], stage_tensors["catccos_post_reduce"]
+        )
+    if "native_local" in stage_tensors and "catccos_pre_reduce" in stage_tensors:
+        stage_metrics["native_local_vs_catccos_pre_reduce"] = compare_tensors(
+            stage_tensors["native_local"], stage_tensors["catccos_pre_reduce"]
+        )
+        stage_metrics["native_reduced_vs_catccos_pre_reduce"] = compare_tensors(
+            stage_tensors["native_reduced"], stage_tensors["catccos_pre_reduce"]
+        )
+        stage_metrics["native_reduced_vs_catccos_post_reduce"] = compare_tensors(
+            stage_tensors["native_reduced"], stage_tensors["catccos_post_reduce"]
+        )
     mismatch = is_significant_mismatch(
         metrics,
         config.cosine_threshold,
@@ -334,7 +409,7 @@ def _run_catccos_probe(
     moe_instance_id = getattr(layer, "moe_instance_id", -1)
     layer_name = str(getattr(layer, "layer_name", f"moe-{moe_instance_id}"))
     record = {
-        "schema_version": 1,
+        "schema_version": 2,
         "rank": rank,
         "world_size": world_size,
         "ep_rank": ep_rank,
@@ -355,6 +430,9 @@ def _run_catccos_probe(
         "relative_l2_threshold": config.relative_l2_threshold,
         "significant_mismatch": mismatch,
         "metrics": metrics,
+        "post_reduce_metrics": post_reduce_metrics,
+        "stage_metrics": stage_metrics,
+        "parallel_context": _probe_parallel_metadata(),
         "input": tensor_metadata(hidden_states),
         "router_logits": tensor_metadata(router_logits),
         "expert_idx": tensor_metadata(expert_idx),
@@ -363,6 +441,31 @@ def _run_catccos_probe(
         "top_k": layer.top_k,
         "num_experts": layer.moe_config.num_experts,
         "weights": {name: tensor_layout(weight) for name, weight in cache.items()},
+        "dump_tensor_names": sorted(
+            {
+                "hidden_states",
+                "router_logits",
+                "expert_idx",
+                "gate_weight",
+                "first_output",
+                "second_output",
+                "first_post_reduce",
+                "second_post_reduce",
+                *stage_tensors,
+            }
+        ),
+        "dump_weight_names": (
+            [
+                "native_w13_weight",
+                "native_w2_weight",
+                "catccos_w1",
+                "catccos_w1_scale",
+                "catccos_w2",
+                "catccos_w2_scale",
+            ]
+            if config.dump_weights
+            else []
+        ),
         "weight_quant_backend": envs_ascend.VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND,
     }
     tensors = {
@@ -372,8 +475,19 @@ def _run_catccos_probe(
         "gate_weight": gate_weight,
         "first_output": first_output,
         "second_output": second_output,
+        "first_post_reduce": first_post_reduce,
+        "second_post_reduce": second_post_reduce,
+        **stage_tensors,
     }
-    dump_path = write_probe_result(config, rank, record, tensors, cache)
+    probe_weights = {
+        "native_w13_weight": layer.w13_weight.data,
+        "native_w2_weight": layer.w2_weight.data,
+        "catccos_w1": cache["w1"],
+        "catccos_w1_scale": cache["w1_scale"],
+        "catccos_w2": cache["w2"],
+        "catccos_w2_scale": cache["w2_scale"],
+    }
+    dump_path = write_probe_result(config, rank, record, tensors, probe_weights)
     logger.info(
         "CatCCOS probe rank=%d layer=%s call=%d order=%s cosine=%s mismatch=%s dump=%s",
         rank,
@@ -409,7 +523,8 @@ def _catccos_forward_impl(
         token_count = hidden_states.numel() // hidden_states.shape[-1]
         selected_calls = getattr(self, "_catccos_debug_selected_calls", {})
         token_count_calls = selected_calls.get(token_count, 0)
-        if config.selects(token_count) and token_count_calls < config.max_calls_per_layer:
+        moe_instance_id = getattr(self, "moe_instance_id", -1)
+        if config.selects(token_count, moe_instance_id) and token_count_calls < config.max_calls_per_layer:
             selected_calls[token_count] = token_count_calls + 1
             self._catccos_debug_selected_calls = selected_calls
             return _run_catccos_probe(

@@ -1,5 +1,10 @@
 # CatCCOS same-input MoE probe
 
+For the targeted first-layer four-stage reduction experiment, use
+[CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md](CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md).
+It records native local/reduced and CatCCOS pre/post-reduction outputs without
+changing the real output returned to the model.
+
 This opt-in diagnostic runs two MoE implementations on independent clones of
 the same real vLLM input. It synchronizes and freezes the first output before
 starting the second implementation, compares the outputs, writes one JSONL

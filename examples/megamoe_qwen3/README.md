@@ -19,6 +19,8 @@ The integration currently targets the official
   and acceptance checklist for TP2/EP2 and TP4/EP4 on another 950DT server.
 - [CATCCOS_PROBE.md](CATCCOS_PROBE.md): same-input native/CatCCOS layer probe,
   four-order validation matrix, JSONL output, and first-mismatch tensor dump.
+- [CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md](CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md):
+  first-layer native-local/reduced and CatCCOS pre/post-reduction probe.
 - [CHANGELOG.md](CHANGELOG.md): purpose and validation status of every commit
   in this integration branch.
 - `run_docker.sh`: launches either the native or CatCCOS service.

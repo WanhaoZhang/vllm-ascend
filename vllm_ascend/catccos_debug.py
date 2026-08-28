@@ -27,15 +27,19 @@ class CatccosProbeConfig:
 
     output_dir: Path
     token_counts: frozenset[int]
+    moe_instance_ids: frozenset[int] | None
     order: str
     max_calls_per_layer: int
     cosine_threshold: float
     relative_l2_threshold: float
     dump_tensors: bool
+    dump_selected: bool
     dump_weights: bool
 
-    def selects(self, token_count: int) -> bool:
-        return token_count in self.token_counts
+    def selects(self, token_count: int, moe_instance_id: int) -> bool:
+        return token_count in self.token_counts and (
+            self.moe_instance_ids is None or moe_instance_id in self.moe_instance_ids
+        )
 
 
 def _parse_token_counts(value: str) -> frozenset[int]:
@@ -46,6 +50,18 @@ def _parse_token_counts(value: str) -> frozenset[int]:
     if not counts or any(count < 1 for count in counts):
         raise ValueError("CatCCOS probe token counts must contain positive integers")
     return counts
+
+
+def _parse_moe_instance_ids(value: str) -> frozenset[int] | None:
+    if not value.strip():
+        return None
+    try:
+        instance_ids = frozenset(int(item.strip()) for item in value.split(",") if item.strip())
+    except ValueError as exc:
+        raise ValueError("CatCCOS probe MoE instance IDs must be comma-separated integers") from exc
+    if not instance_ids or any(instance_id < 0 for instance_id in instance_ids):
+        raise ValueError("CatCCOS probe MoE instance IDs must be non-negative integers")
+    return instance_ids
 
 
 def load_probe_config() -> CatccosProbeConfig:
@@ -71,11 +87,13 @@ def load_probe_config() -> CatccosProbeConfig:
     return CatccosProbeConfig(
         output_dir=Path(output_dir),
         token_counts=_parse_token_counts(envs_ascend.VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS),
+        moe_instance_ids=_parse_moe_instance_ids(envs_ascend.VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS),
         order=order,
         max_calls_per_layer=max_calls,
         cosine_threshold=cosine_threshold,
         relative_l2_threshold=relative_l2_threshold,
         dump_tensors=envs_ascend.VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS,
+        dump_selected=envs_ascend.VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED,
         dump_weights=envs_ascend.VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS,
     )
 
@@ -204,14 +222,15 @@ def write_probe_result(
     with summary_path.open("a", encoding="utf-8") as summary:
         summary.write(json.dumps(record, sort_keys=True) + "\n")
 
-    if not config.dump_tensors or not record["significant_mismatch"]:
+    if not config.dump_tensors or (not config.dump_selected and not record["significant_mismatch"]):
         return None
-    marker_path = config.output_dir / f"first-mismatch-rank{rank:03d}.json"
+    dump_kind = "selected" if config.dump_selected else "mismatch"
+    marker_path = config.output_dir / f"first-{dump_kind}-rank{rank:03d}.json"
     if marker_path.exists():
         return None
 
     layer = _safe_layer_name(record["layer"])
-    dump_path = config.output_dir / f"first-mismatch-rank{rank:03d}-{layer}.pt"
+    dump_path = config.output_dir / f"first-{dump_kind}-rank{rank:03d}-{layer}.pt"
     payload: dict[str, Any] = {
         "metadata": record,
         "tensors": {name: _cpu_tensor(tensor) for name, tensor in tensors.items()},

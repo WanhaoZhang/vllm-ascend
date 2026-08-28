@@ -126,6 +126,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Required when DEBUG_DIR is set. Comma-separated token-row counts, for
     # example "177" for one fixed prompt or "1,177" for decode plus prefill.
     "VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS", ""),
+    # Optional comma-separated zero-based MoE instance IDs. Empty selects all
+    # MoE layers. Use "0" to limit a probe to the first routed MoE layer.
+    "VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS": lambda: os.getenv(
+        "VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS", ""
+    ),
     # Valid values: native-catccos, catccos-native, native-native,
     # catccos-catccos. All ranks must use the same order.
     "VLLM_ASCEND_CATCCOS_DEBUG_ORDER": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_ORDER", "native-catccos").lower(),
@@ -144,6 +149,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Save inputs, routes, and frozen outputs for the first mismatch per rank.
     "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS": lambda: bool(
         int(os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS", "1"))
+    ),
+    # Save the first selected call even when it is below mismatch thresholds.
+    # This is intended for targeted, one-layer contract probes only.
+    "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED", "0"))
     ),
     # Also save the first mismatch's MXFP8 weights and scales. This can use
     # several GiB across ranks, so it is disabled by default.

@@ -115,22 +115,27 @@ class TestCatccosA5(TestCase):
         environment = {
             "VLLM_ASCEND_CATCCOS_DEBUG_DIR": "/tmp/catccos-probe",
             "VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS": "1,177",
+            "VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS": "0,2",
             "VLLM_ASCEND_CATCCOS_DEBUG_ORDER": "catccos-native",
             "VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER": "2",
             "VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD": "0.95",
             "VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD": "0.2",
             "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS": "1",
+            "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED": "1",
             "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS": "0",
         }
         with mock.patch.dict(os.environ, environment):
             config = load_probe_config()
 
-        self.assertTrue(config.selects(1))
-        self.assertTrue(config.selects(177))
-        self.assertFalse(config.selects(64))
+        self.assertTrue(config.selects(1, 0))
+        self.assertTrue(config.selects(177, 2))
+        self.assertFalse(config.selects(177, 1))
+        self.assertFalse(config.selects(64, 0))
+        self.assertEqual(config.moe_instance_ids, frozenset({0, 2}))
         self.assertEqual(config.order, "catccos-native")
         self.assertEqual(config.max_calls_per_layer, 2)
         self.assertEqual(config.relative_l2_threshold, 0.2)
+        self.assertTrue(config.dump_selected)
 
     def test_probe_rejects_invalid_order(self):
         environment = {
@@ -141,6 +146,18 @@ class TestCatccosA5(TestCase):
         with (
             mock.patch.dict(os.environ, environment),
             self.assertRaisesRegex(ValueError, "order must be one of"),
+        ):
+            load_probe_config()
+
+    def test_probe_rejects_negative_moe_instance_id(self):
+        environment = {
+            "VLLM_ASCEND_CATCCOS_DEBUG_DIR": "/tmp/catccos-probe",
+            "VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS": "177",
+            "VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS": "-1",
+        }
+        with (
+            mock.patch.dict(os.environ, environment),
+            self.assertRaisesRegex(ValueError, "must be non-negative"),
         ):
             load_probe_config()
 
@@ -176,11 +193,13 @@ class TestCatccosA5(TestCase):
             config = CatccosProbeConfig(
                 output_dir=Path(directory),
                 token_counts=frozenset({177}),
+                moe_instance_ids=frozenset({0}),
                 order="native-catccos",
                 max_calls_per_layer=1,
                 cosine_threshold=0.99,
                 relative_l2_threshold=0.1,
                 dump_tensors=True,
+                dump_selected=False,
                 dump_weights=False,
             )
             record = {
@@ -198,3 +217,29 @@ class TestCatccosA5(TestCase):
             self.assertIsNone(second_dump)
             summaries = (Path(directory) / "probe-rank000.jsonl").read_text().splitlines()
             self.assertEqual(len(summaries), 2)
+
+    def test_targeted_probe_dumps_selected_call_without_mismatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = CatccosProbeConfig(
+                output_dir=Path(directory),
+                token_counts=frozenset({177}),
+                moe_instance_ids=frozenset({0}),
+                order="native-catccos",
+                max_calls_per_layer=1,
+                cosine_threshold=0.99,
+                relative_l2_threshold=0.1,
+                dump_tensors=True,
+                dump_selected=True,
+                dump_weights=False,
+            )
+            record = {
+                "layer": "model.layers.0.mlp",
+                "significant_mismatch": False,
+            }
+
+            dump = write_probe_result(config, 0, record, {"hidden_states": torch.ones(1, 4)}, {})
+
+            self.assertIsNotNone(dump)
+            assert dump is not None
+            self.assertIn("first-selected-rank000", dump.name)
+            self.assertTrue((Path(directory) / "first-selected-rank000.json").is_file())

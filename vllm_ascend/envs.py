@@ -90,29 +90,17 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `mega_moe` can be used only for moe layer with W8A8/W4A8/bf16(none quant), EP<=64, non-dynamic-eplb.
     # DEPRECATED: use additional_config.enable_fused_mc2 instead.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
-    # Experimental CatCCOS Ascend 950 fused dispatch + FFN + combine backend.
-    # This prototype is available only with vLLM/vLLM-Ascend 0.23.0 and eager
-    # execution. Small token batches use the native MoE implementation.
+    # Deprecated CatCCOS compatibility variables. New deployments should use
+    # additional_config.fused_mc2_backend and the catccos_* config fields.
     "VLLM_ASCEND_CATCCOS": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS", "0"))),
     "VLLM_ASCEND_CATCCOS_LIBRARY_PATH": lambda: os.getenv(
         "VLLM_ASCEND_CATCCOS_LIBRARY_PATH",
         "/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so",
     ),
-    "VLLM_ASCEND_CATCCOS_UTILS_PATH": lambda: os.getenv(
-        "VLLM_ASCEND_CATCCOS_UTILS_PATH", "/workspace/catccos/examples/utils"
-    ),
     "VLLM_ASCEND_CATCCOS_IPPORT": lambda: os.getenv("VLLM_ASCEND_CATCCOS_IPPORT", "tcp://127.0.0.1:27020"),
     # The A5 binding allocates a fixed 1004 MiB symmetric buffer.
     "VLLM_ASCEND_CATCCOS_MEM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MEM", str(1024 * 1024 * 1024))),
-    "VLLM_ASCEND_CATCCOS_MINM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MINM", "64")),
-    # NPU quantization avoids copying every expert weight through the host.
-    # Set to "cpu" only when exact parity with CatCCOS' data generator is needed.
-    "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND": lambda: os.getenv(
-        "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND", "npu"
-    ).lower(),
-    # Surface asynchronous custom-kernel failures at the MoE layer that caused
-    # them. Disable only for performance experiments after correctness testing.
-    "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "1"))),
+    "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "0"))),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

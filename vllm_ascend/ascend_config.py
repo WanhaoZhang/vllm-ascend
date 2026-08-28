@@ -246,6 +246,12 @@ class AscendConfig:
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     mega_moe_max_tokens: int = 131072
+    fused_mc2_backend: str = "auto"
+    catccos_library_path: str = "/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so"
+    catccos_store_url: str = "tcp://127.0.0.1:27020"
+    catccos_local_mem_size: int = 1024 * 1024 * 1024
+    catccos_max_tokens_per_rank: int = 512
+    catccos_sync_after_launch: bool = False
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -316,12 +322,32 @@ class AscendConfig:
                     "next release."
                 )
                 kw[key] = env_value
+        if "fused_mc2_backend" not in kw and ascend_envs.VLLM_ASCEND_CATCCOS:
+            logger.warning_once("VLLM_ASCEND_CATCCOS is deprecated; use additional_config.fused_mc2_backend='catccos'.")
+            kw["fused_mc2_backend"] = "catccos"
+            kw.setdefault("enable_fused_mc2", 1)
+        if kw.get("fused_mc2_backend") == "catccos":
+            catccos_env_fallbacks = {
+                "catccos_library_path": "VLLM_ASCEND_CATCCOS_LIBRARY_PATH",
+                "catccos_store_url": "VLLM_ASCEND_CATCCOS_IPPORT",
+                "catccos_local_mem_size": "VLLM_ASCEND_CATCCOS_MEM",
+                "catccos_sync_after_launch": "VLLM_ASCEND_CATCCOS_SYNC_DEVICE",
+            }
+            for key, env_name in catccos_env_fallbacks.items():
+                if key not in kw and env_name in os.environ:
+                    kw[key] = getattr(ascend_envs, env_name)
         return ArgsKwargs(data.args, kw)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
         if self.weight_nz_mode not in (0, 1, 2):
             raise ValueError(f"weight_nz_mode must be one of 0, 1, or 2; got {self.weight_nz_mode}")
+        if self.fused_mc2_backend not in {"auto", "cann", "catccos"}:
+            raise ValueError(f"fused_mc2_backend must be one of auto, cann, or catccos; got {self.fused_mc2_backend!r}")
+        if self.catccos_local_mem_size <= 0:
+            raise ValueError("catccos_local_mem_size must be positive")
+        if self.catccos_max_tokens_per_rank <= 0:
+            raise ValueError("catccos_max_tokens_per_rank must be positive")
         return self
 
     # ---- derivations + cross-config downgrades/mutex ----
@@ -406,6 +432,17 @@ class AscendConfig:
 
         # enable_fused_mc2 enum + MiniMax mutex + multistream auto-disable
         assert self.enable_fused_mc2 in (0, 1), f"enable_fused_mc2 must be 0 or 1, got {self.enable_fused_mc2}"
+        if self.fused_mc2_backend == "catccos":
+            if self.enable_fused_mc2 != 1:
+                raise ValueError("fused_mc2_backend='catccos' requires enable_fused_mc2=1")
+            if not vc.model_config.enforce_eager:
+                raise ValueError("The CatCCOS fused MC2 backend currently requires --enforce-eager.")
+            if vc.use_v2_model_runner:
+                raise ValueError("The CatCCOS fused MC2 backend currently supports model runner v1 only.")
+            if self.eplb_config.dynamic_eplb:
+                raise ValueError("The CatCCOS fused MC2 backend does not support dynamic EPLB.")
+            if vc.lora_config is not None:
+                raise ValueError("The CatCCOS fused MC2 backend does not support LoRA.")
         model_architectures = getattr(vc.model_config, "architectures", None) or []
         assert not (
             self.enable_fused_mc2 == 1
@@ -420,7 +457,12 @@ class AscendConfig:
                 "VLLM_ASCEND_ENABLE_FUSED_MC2 (fused mc2) and multistream_overlap_shared_expert "
                 "cannot be enabled at the same time. Setting multistream_overlap_shared_expert to False."
             )
-        if self.enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED and not self._is_megamoe_supported_by_config(vc):
+        if (
+            self.enable_fused_mc2 == 1
+            and self.fused_mc2_backend != "catccos"
+            and _MEGA_MOE_SUPPORTED
+            and not self._is_megamoe_supported_by_config(vc)
+        ):
             self.enable_fused_mc2 = 0
             logger.warning_once(
                 "MegaMoe is not supported for this model config, VLLM_ASCEND_ENABLE_FUSED_MC2 will be set to 0."

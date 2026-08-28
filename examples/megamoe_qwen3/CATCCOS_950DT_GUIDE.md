@@ -2,10 +2,10 @@
 
 This guide reproduces the experimental CatCCOS integration on a server that
 already has a working Ascend 950 host driver, Docker, and D2D topology. It uses
-two source repositories and the official vLLM-Ascend 0.23.0 A5 image:
+two source repositories and a compatible current vLLM-Ascend development image:
 
 - vLLM-Ascend integration and launch scripts:
-  `WanhaoZhang/vllm-ascend`, branch `codex/megamoe-vllm`
+  `WanhaoZhang/vllm-ascend`, branch `codex/catccos-fused-mc2-backend`
 - CatCCOS operator and PyTorch extension:
   `zhangwanhao/catccos`, branch `codex/megamoe-vllm`
 
@@ -40,7 +40,7 @@ New checkout:
 ```bash
 mkdir -p /data/src
 
-git clone --branch codex/megamoe-vllm \
+git clone --branch codex/catccos-fused-mc2-backend \
   https://github.com/WanhaoZhang/vllm-ascend.git \
   /data/src/vllm-ascend
 
@@ -52,7 +52,7 @@ git clone --branch codex/megamoe-vllm --recurse-submodules \
 Update an existing checkout without discarding local work:
 
 ```bash
-git -C /data/src/vllm-ascend switch codex/megamoe-vllm
+git -C /data/src/vllm-ascend switch codex/catccos-fused-mc2-backend
 git -C /data/src/vllm-ascend pull --ff-only
 
 git -C /data/src/catccos switch codex/megamoe-vllm
@@ -65,7 +65,7 @@ Before an evaluation, record the exact revisions:
 ```bash
 git -C /data/src/vllm-ascend rev-parse HEAD
 git -C /data/src/catccos rev-parse HEAD
-docker image inspect quay.io/ascend/vllm-ascend:v0.23.0-a5 \
+docker image inspect "$IMAGE" \
   --format '{{.Id}}'
 ```
 
@@ -76,7 +76,7 @@ under `build_torch_a5`. Change `/dev/davinci0` if necessary.
 
 ```bash
 export CATCCOS_SOURCE=/data/src/catccos
-export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-a5
+export IMAGE=<compatible-vllm-ascend-development-image>
 
 docker pull "$IMAGE"
 
@@ -137,7 +137,7 @@ running native and CatCCOS simultaneously.
 
 ## 5. Launch CatCCOS
 
-Single NPU:
+Two NPUs with TP2 and EP2:
 
 ```bash
 cd /data/src/vllm-ascend
@@ -146,14 +146,14 @@ MODEL_PATH=/data/models/Qwen3-30B-A3B \
 MODE=catccos \
 CONTAINER_NAME=megamoe-catccos \
 PORT=18081 \
-NPU_DEVICES=0 \
+NPU_DEVICES=0,1 \
 VLLM_ASCEND_SOURCE=/data/src/vllm-ascend \
 CATCCOS_SOURCE=/data/src/catccos \
 CATCCOS_IPPORT=tcp://127.0.0.1:27020 \
 bash examples/megamoe_qwen3/run_docker.sh
 ```
 
-Two NPUs with TP2 and EP2:
+An alternative two-NPU launch with a higher memory limit:
 
 ```bash
 MODEL_PATH=/data/models/Qwen3-30B-A3B \

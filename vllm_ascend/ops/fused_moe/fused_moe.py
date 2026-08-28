@@ -22,11 +22,17 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
 )
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoERouter
 from vllm.model_executor.layers.fused_moe.layer import MoERunner
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    evaluate_catccos_layer,
+    register_catccos_capability,
+)
 from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts
 from vllm_ascend.ops.fused_moe.shared_experts import (
@@ -86,7 +92,21 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._quant_method,
             )
 
-        setup_moe_comm_method(self.moe_config)
+        catccos_capability = evaluate_catccos_layer(
+            self.moe_config,
+            self.routed_experts.quant_method,
+            self.routed_experts.activation,
+            n_shared_experts=self.routed_experts.n_shared_experts,
+        )
+        register_catccos_capability(self.routed_experts, catccos_capability)
+        if get_ascend_config().fused_mc2_backend == "catccos":
+            if not catccos_capability.supported:
+                raise RuntimeError(f"The routed-expert layer is incompatible with CatCCOS: {catccos_capability.reason}")
+            logger.info_once("CatCCOS fused MC2 layer capability validated.")
+        setup_moe_comm_method(
+            self.moe_config,
+            catccos_capability=catccos_capability,
+        )
         alltoall_comm = get_moe_comm_method(MoECommType.ALLTOALL)
         if alltoall_comm is not None:
             expert_ids_per_ep_rank = getattr(alltoall_comm.token_dispatcher, "expert_ids_per_ep_rank", None)

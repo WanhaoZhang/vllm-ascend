@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-IMAGE="${IMAGE:-quay.io/ascend/vllm-ascend:v0.23.0-a5}"
+IMAGE="${IMAGE:-}"
 CONTAINER_NAME="${CONTAINER_NAME:-megamoe-qwen3}"
 MODE="${MODE:-native}"
 MODEL_PATH="${MODEL_PATH:-}"
@@ -20,30 +20,34 @@ VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE:-}"
 CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
-CATCCOS_MINM="${CATCCOS_MINM:-64}"
-CATCCOS_WEIGHT_QUANT_BACKEND="${CATCCOS_WEIGHT_QUANT_BACKEND:-npu}"
-CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-1}"
+CATCCOS_MAX_TOKENS_PER_RANK="${CATCCOS_MAX_TOKENS_PER_RANK:-512}"
+CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-0}"
 
 usage() {
     cat <<'EOF'
 Usage:
-  MODEL_PATH=/path/to/Qwen3-30B-A3B NPU_DEVICES=0,1 bash run_docker.sh
+  IMAGE=<compatible-image> MODEL_PATH=/path/to/Qwen3-30B-A3B \
+  NPU_DEVICES=0,1 bash run_docker.sh
 
   MODE=catccos \
   VLLM_ASCEND_SOURCE=/path/to/vllm-ascend \
   CATCCOS_SOURCE=/path/to/catccos \
+  IMAGE=<compatible-image> \
   MODEL_PATH=/path/to/Qwen3-30B-A3B \
   NPU_DEVICES=0,1 bash run_docker.sh
 
+Required environment variables:
+  IMAGE and MODEL_PATH
+
 Optional environment variables:
-  MODE (native or catccos), IMAGE, CONTAINER_NAME, SERVED_MODEL_NAME,
+  MODE (native or catccos), CONTAINER_NAME, SERVED_MODEL_NAME,
   PORT, MAX_MODEL_LEN, MAX_NUM_BATCHED_TOKENS, MAX_NUM_SEQS,
   GPU_MEMORY_UTILIZATION, ENABLE_EXPERT_PARALLEL, HEALTH_TIMEOUT, RECREATE
 
 CatCCOS mode:
   VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
-  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MINM,
-  CATCCOS_WEIGHT_QUANT_BACKEND (npu or cpu), and CATCCOS_SYNC_DEVICE (0 or 1).
+  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MAX_TOKENS_PER_RANK, and
+  CATCCOS_SYNC_DEVICE (0 or 1, diagnostic post-launch synchronization).
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing
@@ -65,6 +69,7 @@ fail() {
 [[ -f "${MODEL_PATH}/model.safetensors.index.json" ]] || {
     fail "model.safetensors.index.json is missing"
 }
+[[ -n "${IMAGE}" ]] || fail "IMAGE must name a current vLLM-Ascend development image"
 command -v docker >/dev/null || fail "docker is not installed"
 command -v curl >/dev/null || fail "curl is not installed"
 
@@ -81,8 +86,8 @@ case "${MODE}" in
         [[ -f "${catccos_library}" ]] || {
             fail "CatCCOS extension is missing: ${catccos_library}"
         }
-        [[ "${CATCCOS_WEIGHT_QUANT_BACKEND}" =~ ^(npu|cpu)$ ]] || {
-            fail "CATCCOS_WEIGHT_QUANT_BACKEND must be npu or cpu"
+        [[ "${CATCCOS_MAX_TOKENS_PER_RANK}" =~ ^[1-9][0-9]*$ ]] || {
+            fail "CATCCOS_MAX_TOKENS_PER_RANK must be a positive integer"
         }
         [[ "${CATCCOS_SYNC_DEVICE}" =~ ^[01]$ ]] || {
             fail "CATCCOS_SYNC_DEVICE must be 0 or 1"
@@ -110,6 +115,9 @@ for device_path in /dev/davinci_manager /dev/hisi_hdc; do
 done
 
 parallel_size="${#device_ids[@]}"
+if [[ "${MODE}" == "catccos" ]] && (( parallel_size < 2 )); then
+    fail "CatCCOS mode requires at least two NPUs with expert parallelism"
+fi
 topology_mounts=()
 if (( parallel_size > 1 )); then
     topology_paths=(/lib/route.conf /etc/hccl_rootinfo.json /etc/hixlep)
@@ -141,6 +149,9 @@ case "${ENABLE_EXPERT_PARALLEL}" in
     0|1) enable_ep="${ENABLE_EXPERT_PARALLEL}" ;;
     *) fail "ENABLE_EXPERT_PARALLEL must be auto, 0, or 1" ;;
 esac
+if [[ "${MODE}" == "catccos" ]] && (( enable_ep != 1 )); then
+    fail "CatCCOS mode requires ENABLE_EXPERT_PARALLEL=1 (or auto)"
+fi
 
 serve_args=(
     vllm serve /model
@@ -165,15 +176,15 @@ if [[ "${MODE}" == "catccos" ]]; then
         -v "${CATCCOS_SOURCE}:/workspace/catccos:ro"
     )
     docker_env+=(
-        -e VLLM_ASCEND_CATCCOS=1
-        -e VLLM_ASCEND_CATCCOS_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so
-        -e VLLM_ASCEND_CATCCOS_UTILS_PATH=/workspace/catccos/examples/utils
-        -e "VLLM_ASCEND_CATCCOS_IPPORT=${CATCCOS_IPPORT}"
-        -e "VLLM_ASCEND_CATCCOS_MEM=${CATCCOS_MEM}"
-        -e "VLLM_ASCEND_CATCCOS_MINM=${CATCCOS_MINM}"
-        -e "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND=${CATCCOS_WEIGHT_QUANT_BACKEND}"
-        -e "VLLM_ASCEND_CATCCOS_SYNC_DEVICE=${CATCCOS_SYNC_DEVICE}"
         -e LD_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib:/workspace/catccos/3rdparty/shmem/install/shmem/lib
+    )
+    catccos_sync_json=false
+    if [[ "${CATCCOS_SYNC_DEVICE}" == "1" ]]; then
+        catccos_sync_json=true
+    fi
+    serve_args+=(
+        --additional-config
+        "{\"enable_fused_mc2\":1,\"fused_mc2_backend\":\"catccos\",\"catccos_library_path\":\"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so\",\"catccos_store_url\":\"${CATCCOS_IPPORT}\",\"catccos_local_mem_size\":${CATCCOS_MEM},\"catccos_max_tokens_per_rank\":${CATCCOS_MAX_TOKENS_PER_RANK},\"catccos_sync_after_launch\":${catccos_sync_json}}"
     )
 fi
 if (( parallel_size > 1 )); then

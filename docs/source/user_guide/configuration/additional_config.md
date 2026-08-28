@@ -70,6 +70,12 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). Can also be configured via the `VLLM_ASCEND_ENABLE_MLAPO` environment variable during the migration period. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. Can also be configured via the `VLLM_ASCEND_ENABLE_NZ` environment variable during the migration period. |
 | `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. Can also be configured via the `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable during the migration period. |
+| `fused_mc2_backend`                 | str  | `"auto"` | Select `auto`, `cann`, or the experimental A5 `catccos` fused MC2 backend. CatCCOS currently requires eager mode, model runner v1, BF16 checkpoints, SiLU, expert parallelism, and no shared experts, LoRA, or dynamic EPLB. |
+| `catccos_library_path`              | str  | `"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so"` | CatCCOS PyTorch extension used when `fused_mc2_backend="catccos"`. |
+| `catccos_store_url`                 | str  | `"tcp://127.0.0.1:27020"` | Bootstrap store used by the current CatCCOS runtime. Each concurrent service must use a different endpoint. |
+| `catccos_local_mem_size`            | int  | `1073741824` | Local symmetric-memory allocation passed to CatCCOS initialization. |
+| `catccos_max_tokens_per_rank`       | int  | `512` | Rank-invariant token capacity used when selecting the CatCCOS collective path. |
+| `catccos_sync_after_launch`         | bool | `False` | Diagnostic synchronization after the custom kernel launch. Keep disabled outside correctness debugging. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. Can also be configured via the `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable during the migration period. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |

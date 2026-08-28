@@ -26,6 +26,11 @@ from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import moe_utils
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    CatccosLayerCapability,
+    apply_catccos,
+    catccos_backend_enabled,
+)
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEFusedExpertsInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput, build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
@@ -52,12 +57,19 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
     return _MoECommMethods.get(moe_comm_type)
 
 
-def setup_moe_comm_method(moe_config):
+def setup_moe_comm_method(
+    moe_config,
+    *,
+    catccos_capability: CatccosLayerCapability | None = None,
+):
     if moe_config.ep_size > 1:
         _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
         _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(moe_config)
+        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
+            moe_config,
+            catccos_capability=catccos_capability,
+        )
     else:
         _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
 
@@ -257,12 +269,21 @@ class FusedMC2CommImpl(MoECommMethod):
     Communication and Computation parallelism on Ascend devices.
     """
 
-    def __init__(self, moe_config):
+    def __init__(
+        self,
+        moe_config,
+        *,
+        catccos_capability: CatccosLayerCapability | None = None,
+    ):
+        self.catccos_capability = catccos_capability or CatccosLayerCapability(
+            False,
+            "layer capability was not registered",
+        )
         super().__init__(moe_config)
-        if _MEGA_MOE_SUPPORTED:
+        if _MEGA_MOE_SUPPORTED and not catccos_backend_enabled():
             self.mega_moe_symm_buffer = None
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops()
-        if get_ascend_config().enable_fused_mc2 == 1:
+        if get_ascend_config().enable_fused_mc2 == 1 and not catccos_backend_enabled():
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -416,6 +437,25 @@ class FusedMC2CommImpl(MoECommMethod):
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
+
+        if catccos_backend_enabled():
+            if not self.catccos_capability.supported:
+                raise RuntimeError(f"CatCCOS was selected for an unsupported layer: {self.catccos_capability.reason}")
+            weights = fused_experts_input.weights
+            if weights.w1_scale is None or weights.w2_scale is None:
+                raise RuntimeError("CatCCOS requires MXFP8 weight scales")
+            if not isinstance(weights.w1, torch.Tensor) or not isinstance(weights.w2, torch.Tensor):
+                raise RuntimeError("CatCCOS requires packed expert weights as tensors")
+            out = apply_catccos(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids,
+                fused_experts_input.topk_weights,
+                weights.w1,
+                weights.w1_scale,
+                weights.w2,
+                weights.w2_scale,
+            )
+            return FusedExpertsResult(routed_out=out)
 
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:

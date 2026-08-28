@@ -391,6 +391,38 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+def test_select_moe_comm_method_a5_catccos(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=512,
+        ep_world_size=4,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            enable_prefill_mc2=False,
+            fused_mc2_backend="catccos",
+        ),
+    )
+    vllm_config = _make_vllm_config(
+        world_size=4,
+        top_k_experts=8,
+    )
+
+    assert (
+        afc.select_moe_comm_method(
+            177,
+            vllm_config,
+            catccos_supported=True,
+        )
+        == MoECommType.FUSED_MC2
+    )
+
+
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

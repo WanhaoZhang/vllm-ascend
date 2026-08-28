@@ -34,6 +34,10 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    catccos_backend_enabled,
+    prepare_catccos_weights,
+)
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
@@ -82,6 +86,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         replace_parameter(layer, "w2_weight", w2_data)
 
+        if catccos_backend_enabled():
+            prepare_catccos_weights(layer)
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+            return
+
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
         # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
@@ -124,7 +134,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _MEGA_MOE_SUPPORTED:
+            if catccos_backend_enabled():
+                if not getattr(layer, "_catccos_weights_ready", False):
+                    raise RuntimeError("CatCCOS weights were not prepared during model loading")
+                w1 = layer.catccos_w1
+                w2 = layer.catccos_w2
+                w1_scale = layer.catccos_w1_scale
+                w2_scale = layer.catccos_w2_scale
+                w1_scale_bias = None
+                w2_scale_bias = None
+            elif _MEGA_MOE_SUPPORTED:
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None

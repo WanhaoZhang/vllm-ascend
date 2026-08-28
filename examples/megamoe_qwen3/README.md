@@ -6,13 +6,15 @@ vLLM-Ascend MoE path and the experimental CatCCOS
 `ascend950_dispatch_ffn_combine` path so that the two implementations can be
 compared with identical serving arguments.
 
-The integration currently targets the official
-`quay.io/ascend/vllm-ascend:v0.23.0-a5` image and eager execution.
+The integration uses the current vLLM-Ascend source tree and eager execution.
+Set `IMAGE` explicitly to a development image built for the same vLLM and
+vLLM-Ascend revisions; the older v0.23 image used by the monkey-patch branch
+is not compatible with this native backend integration.
 
 ## Documents and scripts
 
-- [CATCCOS_950DT_GUIDE.md](CATCCOS_950DT_GUIDE.md): clone, build, single-NPU,
-  TP2/TP4, verification, and troubleshooting steps for another 950DT server.
+- [CATCCOS_950DT_GUIDE.md](CATCCOS_950DT_GUIDE.md): clone, build, TP2/TP4,
+  verification, and troubleshooting steps for another 950DT server.
 - [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md): controlled native-versus-CatCCOS
   GSM8K accuracy and performance evaluation.
 - [MULTI_NPU_TEST_REPORT.md](MULTI_NPU_TEST_REPORT.md): Chinese execution report
@@ -25,11 +27,10 @@ The integration currently targets the official
 
 ## Quick start
 
-Pull the image and define the paths used by both modes:
+Define a compatible development image and the paths used by both modes:
 
 ```bash
-docker pull quay.io/ascend/vllm-ascend:v0.23.0-a5
-
+export IMAGE=<compatible-vllm-ascend-development-image>
 export MODEL_PATH=/data/models/Qwen3-30B-A3B
 export VLLM_ASCEND_SOURCE=/data/src/vllm-ascend
 export CATCCOS_SOURCE=/data/src/catccos
@@ -46,13 +47,13 @@ MODEL_PATH="$MODEL_PATH" \
 bash examples/megamoe_qwen3/run_docker.sh
 ```
 
-CatCCOS single-NPU service:
+CatCCOS two-NPU service:
 
 ```bash
 MODE=catccos \
 CONTAINER_NAME=megamoe-catccos \
 PORT=18081 \
-NPU_DEVICES=0 \
+NPU_DEVICES=0,1 \
 VLLM_ASCEND_SOURCE="$VLLM_ASCEND_SOURCE" \
 CATCCOS_SOURCE="$CATCCOS_SOURCE" \
 MODEL_PATH="$MODEL_PATH" \
@@ -63,7 +64,7 @@ The CatCCOS extension must already exist at
 `$CATCCOS_SOURCE/build_torch_a5/lib/libcatccos_torch.so`. See the 950DT guide
 for the reproducible build command.
 
-For two or four NPUs, change `NPU_DEVICES` to `0,1` or `0,1,2,3`. The launcher
+For four NPUs, change `NPU_DEVICES` to `0,1,2,3`. The launcher
 automatically sets tensor parallel size and enables expert parallelism. It
 also refuses to start multi-NPU mode if the host topology files are absent.
 
@@ -94,15 +95,17 @@ docker logs megamoe-catccos 2>&1 | grep -E \
 
 ## Scope and known risk
 
-The backend accepts unquantized BF16 MoE layers with SiLU activation. Batches
-with fewer than `VLLM_ASCEND_CATCCOS_MINM` tokens use the native path. Dynamic
-EPLB, quantized model weights, and the shared-expert event path are not
-supported by this prototype.
+The backend accepts unquantized BF16 MoE layers with SiLU activation and
+converts expert weights to MXFP8 during model weight processing. Communication
+selection uses the rank-invariant MC2 token capacity; batches above
+`catccos_max_tokens_per_rank` use the native path on every EP rank. Dynamic
+EPLB, quantized checkpoints, model runner v2, graph mode, LoRA, and shared
+experts are rejected during startup.
 
-Single-NPU serving and numerical smoke tests have passed. Multi-NPU startup
-cannot be validated on a host without the generated 950 D2D topology. A prior
-EP4 run also showed a large GSM8K accuracy regression. The synchronization
-fix in this branch addresses direct-launch input readiness, but it is not
-evidence that the cross-rank accuracy issue is resolved. Always run the
+Capability, routing-selection, shape, and adapter unit tests pass. Multi-NPU
+startup and numerical correctness cannot be validated on a host without HCCL
+and the generated 950 D2D topology. A prior EP4 run on the monkey-patch branch
+also showed a large GSM8K accuracy regression; this integration refactor is
+not evidence that the cross-rank issue is resolved. Always run the
 native/CatCCOS A/B procedure in [AISBENCH_GSM8K.md](AISBENCH_GSM8K.md) before
 using multi-NPU performance numbers.

@@ -17,6 +17,9 @@ The integration currently targets the official
   GSM8K accuracy and performance evaluation.
 - [MULTI_NPU_TEST_REPORT.md](MULTI_NPU_TEST_REPORT.md): Chinese execution report
   and acceptance checklist for TP2/EP2 and TP4/EP4 on another 950DT server.
+- [CATCCOS_FORMAL_E2E_QUICKSTART.md](CATCCOS_FORMAL_E2E_QUICKSTART.md):
+  correctness-first end-to-end validation on the formal FusedMC2 path, both
+  from the host and inside an existing container.
 - `CATCCOS_PROBE.md` and `CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md` record the
   historical monkey-patch investigation; they are not production launch paths.
 - [CHANGELOG.md](CHANGELOG.md): purpose and validation status of every commit
@@ -61,6 +64,10 @@ MODEL_PATH="$MODEL_PATH" \
 bash examples/megamoe_qwen3/run_docker.sh
 ```
 
+The launcher enables post-launch device synchronization by default for the
+first correctness run. Set `CATCCOS_SYNC_DEVICE=0` only after correctness is
+accepted and before measuring performance.
+
 The CatCCOS extension must already exist at
 `$CATCCOS_SOURCE/build_torch_a5/lib/libcatccos_torch.so`. See the 950DT guide
 for the reproducible build command.
@@ -91,7 +98,7 @@ path:
 
 ```bash
 docker logs megamoe-catccos 2>&1 | grep -E \
-  'Initialized CatCCOS|Converted CatCCOS'
+  'Initialized CatCCOS|Converted CatCCOS|Executed CatCCOS through the formal FusedMC2 backend'
 ```
 
 ## Scope and known risk
@@ -101,7 +108,8 @@ lifecycle. It accepts unquantized BF16 MoE layers with SiLU activation and
 prepares persistent MXFP8 expert weights during model loading. Dynamic EPLB,
 quantized model weights, shared experts, graph mode, and LoRA are rejected.
 The direct CatCCOS launcher is outside the TorchNPU dependency scheduler, so
-an input-readiness synchronization is retained before each call.
+input-readiness synchronization is retained before each call. The example
+launcher also enables post-launch synchronization for correctness validation.
 
 Capability, shape, routing-selection, and v0.23 lifecycle tests pass. Multi-NPU
 startup cannot be validated on a host without generated 950 D2D topology. A

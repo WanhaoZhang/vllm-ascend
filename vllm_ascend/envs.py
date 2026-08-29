@@ -114,6 +114,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_CATCCOS_IPPORT": lambda: os.getenv("VLLM_ASCEND_CATCCOS_IPPORT", "tcp://127.0.0.1:27020"),
     # The A5 binding allocates a fixed 1004 MiB symmetric buffer.
     "VLLM_ASCEND_CATCCOS_MEM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MEM", str(1024 * 1024 * 1024))),
+    # Synchronize the NPU after a direct CatCCOS launch. Disabled by default;
+    # enable it for correctness validation until stream integration is proven.
+    # This variable is not sensitive and accepts 0 or 1.
+    "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "0"))),
     "VLLM_ASCEND_CATCCOS_MINM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MINM", "1")),
     # NPU quantization avoids copying every expert weight through the host.
     # Set to "cpu" only when exact parity with CatCCOS' data generator is needed.

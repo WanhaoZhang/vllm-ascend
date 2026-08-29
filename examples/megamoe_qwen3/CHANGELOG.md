@@ -5,6 +5,16 @@ matched to the behavior being evaluated. Hashes are from the
 vLLM-Ascend `codex/megamoe-vllm-v023` and CatCCOS
 `codex/megamoe-vllm` branches unless stated otherwise.
 
+### 2026-08-29 formal startup and first E2E validation
+
+Defined `VLLM_ASCEND_CATCCOS_SYNC_DEVICE`, fixing the `AscendConfig`
+initialization failure caused by the missing centralized environment entry.
+The example launcher now enables post-launch synchronization by default for
+correctness-first validation. Added `CATCCOS_FORMAL_E2E_QUICKSTART.md` for a
+first formal FusedMC2 request from either the host launcher or an already
+running container, and added a one-time execution log to distinguish a real
+CatCCOS request from startup-only weight preparation.
+
 ## vLLM-Ascend repository
 
 ### `d20d8714` — Qwen3 MoE Docker launcher

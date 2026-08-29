@@ -21,7 +21,7 @@ CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
 CATCCOS_MAX_TOKENS_PER_RANK="${CATCCOS_MAX_TOKENS_PER_RANK:-512}"
-CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-0}"
+CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-1}"
 
 usage() {
     cat <<'EOF'
@@ -42,7 +42,7 @@ Optional environment variables:
 CatCCOS mode:
   VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
   CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MAX_TOKENS_PER_RANK, and
-  CATCCOS_SYNC_DEVICE (0 or 1, diagnostic post-launch synchronization).
+  CATCCOS_SYNC_DEVICE (0 or 1, post-launch synchronization; default 1).
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing

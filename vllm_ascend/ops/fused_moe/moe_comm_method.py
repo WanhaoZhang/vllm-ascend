@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -318,6 +319,7 @@ class FusedMC2CommImpl(MoECommMethod):
                 weights.w2,
                 weights.w2_scale,
             )
+            logger.info_once("Executed CatCCOS through the formal FusedMC2 backend")
             return FusedExpertsResult(routed_out=out, swiglu_limit=fused_experts_input.swiglu_limit)
 
         # Apply log2phy if needed

@@ -17,6 +17,7 @@ from vllm_ascend import envs as envs_ascend
 _INITIALIZED_GROUP: tuple[int, int] | None = None
 _INITIALIZE_LOCK = threading.Lock()
 _ORIGINAL_FORWARD = None
+_ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT = None
 
 
 @lru_cache(maxsize=1)
@@ -301,8 +302,7 @@ def _probe_parallel_metadata() -> dict[str, Any]:
     moe_comm_type = _EXTRA_CTX.moe_comm_type
     flash_comm_v1_enabled = bool(_EXTRA_CTX.flash_comm_v1_enabled)
     outer_reduction_is_identity = (
-        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}
-        or flash_comm_v1_enabled
+        moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2} or flash_comm_v1_enabled
     )
     return {
         "moe_comm_type": moe_comm_type.name if moe_comm_type is not None else None,
@@ -356,8 +356,8 @@ def _run_catccos_probe(
     )
     # Use the same custom op as MoERunner._maybe_reduce_final_output on clones.
     # Every rank executes these collectives in the same order. The actual
-    # output returned below is untouched and still receives its normal outer
-    # reduction after AscendFusedMoE.forward_impl returns.
+    # outputs returned below stay untouched so the patched runner can apply
+    # the selected backend's real reduction contract afterwards.
     first_post_reduce = _apply_probe_outer_reduction(first_output)
     second_post_reduce = _apply_probe_outer_reduction(second_output)
 
@@ -505,12 +505,32 @@ def _run_catccos_probe(
     return first_output
 
 
+def _set_catccos_output_is_reduced(layer, is_reduced: bool) -> None:
+    runner = getattr(layer, "runner", None)
+    if runner is None:
+        raise RuntimeError("CatCCOS A5 requires AscendFusedMoE to expose its MoERunner")
+    runner._catccos_a5_output_is_reduced = is_reduced
+
+
+def _catccos_maybe_reduce_final_output(
+    self,
+    states: torch.Tensor,
+    trunc_size: int,
+) -> torch.Tensor:
+    if getattr(self, "_catccos_a5_output_is_reduced", False):
+        self._catccos_a5_output_is_reduced = False
+        return states[..., :trunc_size]
+    assert _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT is not None
+    return _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT(self, states, trunc_size)
+
+
 def _catccos_forward_impl(
     self,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     return_with_event: bool = False,
 ):
+    _set_catccos_output_is_reduced(self, False)
     if _should_use_native_path(self, hidden_states, return_with_event):
         assert _ORIGINAL_FORWARD is not None
         return _ORIGINAL_FORWARD(self, hidden_states, router_logits, return_with_event)
@@ -527,32 +547,47 @@ def _catccos_forward_impl(
         if config.selects(token_count, moe_instance_id) and token_count_calls < config.max_calls_per_layer:
             selected_calls[token_count] = token_count_calls + 1
             self._catccos_debug_selected_calls = selected_calls
-            return _run_catccos_probe(
+            output = _run_catccos_probe(
                 self,
                 hidden_states,
                 router_logits,
                 config,
                 token_count_calls,
             )
+            if "catccos" in config.order.split("-"):
+                _set_catccos_output_is_reduced(self, True)
+            return output
 
     _ensure_initialized()
     cache = _get_or_build_weight_cache(self)
     expert_idx, gate_weight = _select_catccos_routes(self, hidden_states, router_logits)
-    return _launch_catccos(hidden_states, expert_idx, gate_weight, cache)
+    output = _launch_catccos(hidden_states, expert_idx, gate_weight, cache)
+    _set_catccos_output_is_reduced(self, True)
+    return output
 
 
 def apply_catccos_patch() -> None:
     """Patch the vLLM-Ascend 0.23 routed MoE implementation."""
-    global _ORIGINAL_FORWARD
+    global _ORIGINAL_FORWARD, _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT
     if not envs_ascend.VLLM_ASCEND_CATCCOS:
         return
     try:
-        from vllm_ascend.ops.fused_moe.fused_moe_0_23_0 import AscendFusedMoE
+        from vllm_ascend.ops.fused_moe.fused_moe_0_23_0 import (
+            AscendFusedMoE,
+            AscendMoERunner,
+        )
     except ImportError as exc:
         raise RuntimeError("CatCCOS A5 integration currently requires vLLM-Ascend 0.23.0") from exc
-    if getattr(AscendFusedMoE.forward_impl, "_catccos_a5_patched", False):
-        return
-    _ORIGINAL_FORWARD = AscendFusedMoE.forward_impl
-    _catccos_forward_impl._catccos_a5_patched = True
-    AscendFusedMoE.forward_impl = _catccos_forward_impl
+    if not getattr(AscendFusedMoE.forward_impl, "_catccos_a5_patched", False):
+        _ORIGINAL_FORWARD = AscendFusedMoE.forward_impl
+        _catccos_forward_impl._catccos_a5_patched = True
+        AscendFusedMoE.forward_impl = _catccos_forward_impl
+    if not getattr(
+        AscendMoERunner._maybe_reduce_final_output,
+        "_catccos_a5_patched",
+        False,
+    ):
+        _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT = AscendMoERunner._maybe_reduce_final_output
+        _catccos_maybe_reduce_final_output._catccos_a5_patched = True
+        AscendMoERunner._maybe_reduce_final_output = _catccos_maybe_reduce_final_output
     logger.info("Enabled CatCCOS A5 fused dispatch-FFN-combine backend")

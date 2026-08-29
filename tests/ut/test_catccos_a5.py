@@ -9,6 +9,7 @@ from unittest import TestCase, mock
 
 import torch
 
+import vllm_ascend.catccos_patch as catccos_patch
 from vllm_ascend.catccos_debug import (
     CatccosProbeConfig,
     compare_tensors,
@@ -18,6 +19,8 @@ from vllm_ascend.catccos_debug import (
     write_probe_result,
 )
 from vllm_ascend.catccos_patch import (
+    _catccos_forward_impl,
+    _catccos_maybe_reduce_final_output,
     _quantize_weight,
     _should_use_native_path,
     _validate_weight_shapes,
@@ -110,6 +113,100 @@ class TestCatccosA5(TestCase):
             self.assertRaisesRegex(ValueError, "must be 'npu' or 'cpu'"),
         ):
             _quantize_weight(torch.empty(1))
+
+    def test_catccos_output_skips_outer_tp_reduction(self):
+        runner = SimpleNamespace(_catccos_a5_output_is_reduced=True)
+        states = torch.arange(8).reshape(2, 4)
+        original_reduce = mock.Mock()
+
+        with mock.patch.object(
+            catccos_patch,
+            "_ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT",
+            original_reduce,
+        ):
+            output = _catccos_maybe_reduce_final_output(runner, states, 3)
+
+        torch.testing.assert_close(output, states[..., :3])
+        original_reduce.assert_not_called()
+        self.assertFalse(runner._catccos_a5_output_is_reduced)
+
+    def test_native_output_keeps_outer_tp_reduction(self):
+        runner = SimpleNamespace(_catccos_a5_output_is_reduced=False)
+        states = torch.ones(2, 4)
+        reduced = torch.full((2, 3), 4.0)
+        original_reduce = mock.Mock(return_value=reduced)
+
+        with mock.patch.object(
+            catccos_patch,
+            "_ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT",
+            original_reduce,
+        ):
+            output = _catccos_maybe_reduce_final_output(runner, states, 3)
+
+        self.assertIs(output, reduced)
+        original_reduce.assert_called_once_with(runner, states, 3)
+
+    def test_catccos_forward_marks_output_as_reduced(self):
+        runner = SimpleNamespace()
+        layer = SimpleNamespace(runner=runner)
+        hidden_states = torch.ones(2, 4)
+        router_logits = torch.ones(2, 8)
+        expected = torch.full((2, 4), 2.0)
+
+        with (
+            mock.patch.object(
+                catccos_patch,
+                "_should_use_native_path",
+                return_value=False,
+            ),
+            mock.patch.object(catccos_patch, "_ensure_initialized"),
+            mock.patch.object(
+                catccos_patch,
+                "_get_or_build_weight_cache",
+                return_value={},
+            ),
+            mock.patch.object(
+                catccos_patch,
+                "_select_catccos_routes",
+                return_value=(torch.empty(0), torch.empty(0)),
+            ),
+            mock.patch.object(catccos_patch, "_launch_catccos", return_value=expected),
+            mock.patch.dict(
+                os.environ,
+                {"VLLM_ASCEND_CATCCOS_DEBUG_DIR": ""},
+            ),
+        ):
+            output = _catccos_forward_impl(layer, hidden_states, router_logits)
+
+        self.assertIs(output, expected)
+        self.assertTrue(runner._catccos_a5_output_is_reduced)
+
+    def test_native_fallback_resets_reduction_contract(self):
+        runner = SimpleNamespace(_catccos_a5_output_is_reduced=True)
+        layer = SimpleNamespace(runner=runner)
+        hidden_states = torch.ones(2, 4)
+        router_logits = torch.ones(2, 8)
+        expected = torch.full((2, 4), 3.0)
+        original_forward = mock.Mock(return_value=expected)
+
+        with (
+            mock.patch.object(
+                catccos_patch,
+                "_should_use_native_path",
+                return_value=True,
+            ),
+            mock.patch.object(catccos_patch, "_ORIGINAL_FORWARD", original_forward),
+        ):
+            output = _catccos_forward_impl(layer, hidden_states, router_logits)
+
+        self.assertIs(output, expected)
+        self.assertFalse(runner._catccos_a5_output_is_reduced)
+        original_forward.assert_called_once_with(
+            layer,
+            hidden_states,
+            router_logits,
+            False,
+        )
 
     def test_probe_config_selects_fixed_prompt_token_count(self):
         environment = {

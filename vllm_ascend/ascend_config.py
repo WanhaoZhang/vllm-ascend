@@ -176,6 +176,36 @@ class AscendConfig:
             "VLLM_ASCEND_ENABLE_FUSED_MC2",
             ascend_envs.VLLM_ASCEND_ENABLE_FUSED_MC2,
         )
+        # CatCCOS is an alternate implementation of the v0.23 FusedMC2 path.
+        # Keep the old environment switch as a compatibility alias while
+        # making the backend explicit for new launches.
+        self.fused_mc2_backend = additional_config.get(
+            "fused_mc2_backend",
+            "catccos" if ascend_envs.VLLM_ASCEND_CATCCOS else "auto",
+        )
+        self.catccos_library_path = additional_config.get(
+            "catccos_library_path", ascend_envs.VLLM_ASCEND_CATCCOS_LIBRARY_PATH
+        )
+        self.catccos_store_url = additional_config.get("catccos_store_url", ascend_envs.VLLM_ASCEND_CATCCOS_IPPORT)
+        self.catccos_local_mem_size = additional_config.get(
+            "catccos_local_mem_size", ascend_envs.VLLM_ASCEND_CATCCOS_MEM
+        )
+        self.catccos_max_tokens_per_rank = additional_config.get("catccos_max_tokens_per_rank", 512)
+        self.catccos_sync_after_launch = additional_config.get(
+            "catccos_sync_after_launch", ascend_envs.VLLM_ASCEND_CATCCOS_SYNC_DEVICE
+        )
+        if self.fused_mc2_backend not in {"auto", "cann", "catccos"}:
+            raise ValueError(f"fused_mc2_backend must be auto, cann, or catccos, got {self.fused_mc2_backend!r}")
+        if self.fused_mc2_backend == "catccos":
+            self.enable_fused_mc2 = 1
+            if self.catccos_local_mem_size <= 0 or self.catccos_max_tokens_per_rank <= 0:
+                raise ValueError("CatCCOS memory and token capacity must be positive")
+            if not vllm_config.parallel_config.enable_expert_parallel:
+                raise ValueError("CatCCOS requires expert parallelism")
+            if vllm_config.model_config is not None and not vllm_config.model_config.enforce_eager:
+                raise ValueError("CatCCOS requires eager execution")
+            if vllm_config.lora_config is not None:
+                raise ValueError("CatCCOS does not support LoRA")
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(

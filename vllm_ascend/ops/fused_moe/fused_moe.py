@@ -38,6 +38,10 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.flash_common3_context import get_flash_common3_context, set_flash_common3_context
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    catccos_backend_enabled,
+    prepare_catccos_weights,
+)
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -126,6 +130,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
+            if catccos_backend_enabled():
+                prepare_catccos_weights(layer)
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if enable_fused_mc2 == 1 and self.dynamic_eplb:
@@ -235,17 +241,31 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
+            if catccos_backend_enabled():
+                w1 = layer.catccos_w1
+                w2 = layer.catccos_w2
+                w1_scale = layer.catccos_w1_scale
+                w2_scale = layer.catccos_w2_scale
+                w1_scale_bias = None
+                w2_scale_bias = None
+            elif self.dynamic_eplb and not has_split_weight_lists:
                 logger.warning_once(
                     "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
                     "tensor lists. This may cause accuracy issues or communication hangs."
                 )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            else:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None

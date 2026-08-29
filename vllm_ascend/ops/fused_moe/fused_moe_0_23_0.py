@@ -23,6 +23,11 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.ops.fused_moe.catccos_adapter import (
+    catccos_backend_enabled,
+    evaluate_catccos_layer,
+    register_catccos_capability,
+)
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
     AllGatherCommImpl,
@@ -97,6 +102,10 @@ class AscendMoERunner(MoERunner):
         states: torch.Tensor,
         trunc_size: int,
     ) -> torch.Tensor:
+        if getattr(self, "_catccos_output_is_reduced", False):
+            self._catccos_output_is_reduced = False
+            logger.info_once("Skipping outer TP all-reduce for the already-reduced CatCCOS output")
+            return states[..., :trunc_size]
         states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
@@ -182,6 +191,16 @@ class AscendFusedMoE(FusedMoE):
         # to the upstream UnquantizedFusedMoEMethod.maybe_make_prepare_finalize,
         # which raises by design.
         self.base_quant_method = self.quant_method
+
+        self.catccos_capability = evaluate_catccos_layer(
+            self.moe_config,
+            self.quant_method,
+            getattr(self, "activation", "silu"),
+            n_shared_experts=num_shared_experts,
+        )
+        register_catccos_capability(self, self.catccos_capability)
+        if catccos_backend_enabled() and not self.catccos_capability.supported:
+            raise RuntimeError(f"The routed-expert layer is incompatible with CatCCOS: {self.catccos_capability.reason}")
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -275,7 +294,7 @@ class AscendFusedMoE(FusedMoE):
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
 
-        setup_moe_comm_method(self.moe_config)
+        setup_moe_comm_method(self.moe_config, catccos_capability=self.catccos_capability)
         self.quant_type = self._get_quant_type()
 
         self.runner = AscendMoERunner(
@@ -543,6 +562,8 @@ class AscendFusedMoE(FusedMoE):
             reduce_results=isinstance(_EXTRA_CTX.moe_comm_method, AllGatherCommImpl),
             padded_hidden_states_shape=padded_hidden_states_shape,
         )
+        if catccos_backend_enabled() and _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            self.runner._catccos_output_is_reduced = True
 
         if return_with_event:
             return FusedMoEResult(

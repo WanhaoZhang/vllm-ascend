@@ -20,18 +20,8 @@ VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE:-}"
 CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
-CATCCOS_MINM="${CATCCOS_MINM:-}"
-CATCCOS_WEIGHT_QUANT_BACKEND="${CATCCOS_WEIGHT_QUANT_BACKEND:-npu}"
-CATCCOS_DEBUG_HOST_DIR="${CATCCOS_DEBUG_HOST_DIR:-}"
-CATCCOS_DEBUG_TOKEN_COUNTS="${CATCCOS_DEBUG_TOKEN_COUNTS:-}"
-CATCCOS_DEBUG_MOE_INSTANCE_IDS="${CATCCOS_DEBUG_MOE_INSTANCE_IDS:-}"
-CATCCOS_DEBUG_ORDER="${CATCCOS_DEBUG_ORDER:-native-catccos}"
-CATCCOS_DEBUG_MAX_CALLS_PER_LAYER="${CATCCOS_DEBUG_MAX_CALLS_PER_LAYER:-1}"
-CATCCOS_DEBUG_COSINE_THRESHOLD="${CATCCOS_DEBUG_COSINE_THRESHOLD:-0.99}"
-CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD="${CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD:-0.1}"
-CATCCOS_DEBUG_DUMP_TENSORS="${CATCCOS_DEBUG_DUMP_TENSORS:-1}"
-CATCCOS_DEBUG_DUMP_SELECTED="${CATCCOS_DEBUG_DUMP_SELECTED:-0}"
-CATCCOS_DEBUG_DUMP_WEIGHTS="${CATCCOS_DEBUG_DUMP_WEIGHTS:-0}"
+CATCCOS_MAX_TOKENS_PER_RANK="${CATCCOS_MAX_TOKENS_PER_RANK:-512}"
+CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-0}"
 
 usage() {
     cat <<'EOF'
@@ -51,11 +41,8 @@ Optional environment variables:
 
 CatCCOS mode:
   VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
-  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MINM,
-  and CATCCOS_WEIGHT_QUANT_BACKEND (npu or cpu).
-  CATCCOS_MINM defaults to 1 for one NPU and 64 for multi-NPU runs.
-  Set CATCCOS_DEBUG_HOST_DIR and CATCCOS_DEBUG_TOKEN_COUNTS to enable the
-  same-input native/CatCCOS correctness probe. See CATCCOS_PROBE.md.
+  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MAX_TOKENS_PER_RANK, and
+  CATCCOS_SYNC_DEVICE (0 or 1, diagnostic post-launch synchronization).
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing
@@ -89,54 +76,19 @@ case "${MODE}" in
         [[ -d "${CATCCOS_SOURCE}" ]] || {
             fail "CATCCOS_SOURCE is required in catccos mode"
         }
-        for runtime_file in __init__.py envs.py catccos_patch.py catccos_debug.py; do
-            [[ -f "${VLLM_ASCEND_SOURCE}/vllm_ascend/${runtime_file}" ]] || {
-                fail "vLLM-Ascend runtime file is missing: ${runtime_file}"
-            }
-        done
+        [[ -f "${VLLM_ASCEND_SOURCE}/vllm_ascend/ops/fused_moe/catccos_adapter.py" ]] || {
+            fail "formal CatCCOS adapter is missing from VLLM_ASCEND_SOURCE"
+        }
         catccos_library="${CATCCOS_SOURCE}/build_torch_a5/lib/libcatccos_torch.so"
         [[ -f "${catccos_library}" ]] || {
             fail "CatCCOS extension is missing: ${catccos_library}"
         }
-        [[ "${CATCCOS_WEIGHT_QUANT_BACKEND}" =~ ^(npu|cpu)$ ]] || {
-            fail "CATCCOS_WEIGHT_QUANT_BACKEND must be npu or cpu"
+        [[ "${CATCCOS_MAX_TOKENS_PER_RANK}" =~ ^[1-9][0-9]*$ ]] || {
+            fail "CATCCOS_MAX_TOKENS_PER_RANK must be a positive integer"
         }
-        if [[ -n "${CATCCOS_DEBUG_HOST_DIR}" ]]; then
-            [[ "${CATCCOS_DEBUG_HOST_DIR}" == /* ]] || {
-                fail "CATCCOS_DEBUG_HOST_DIR must be an absolute host path"
-            }
-            [[ "${CATCCOS_DEBUG_TOKEN_COUNTS}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || {
-                fail "CATCCOS_DEBUG_TOKEN_COUNTS must contain positive comma-separated integers"
-            }
-            [[ -z "${CATCCOS_DEBUG_MOE_INSTANCE_IDS}" || "${CATCCOS_DEBUG_MOE_INSTANCE_IDS}" =~ ^[0-9]+(,[0-9]+)*$ ]] || {
-                fail "CATCCOS_DEBUG_MOE_INSTANCE_IDS must contain non-negative comma-separated integers"
-            }
-            [[ "${CATCCOS_DEBUG_ORDER}" =~ ^(native-catccos|catccos-native|native-native|catccos-catccos)$ ]] || {
-                fail "CATCCOS_DEBUG_ORDER is invalid"
-            }
-            [[ "${CATCCOS_DEBUG_MAX_CALLS_PER_LAYER}" =~ ^[1-9][0-9]*$ ]] || {
-                fail "CATCCOS_DEBUG_MAX_CALLS_PER_LAYER must be positive"
-            }
-            [[ "${CATCCOS_DEBUG_COSINE_THRESHOLD}" =~ ^(0(\.[0-9]+)?|1(\.0+)?)$ ]] || {
-                fail "CATCCOS_DEBUG_COSINE_THRESHOLD must be between 0 and 1"
-            }
-            [[ "${CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD}" =~ ^(0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*(\.[0-9]+)?)$ ]] || {
-                fail "CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD must be positive"
-            }
-            [[ "${CATCCOS_DEBUG_DUMP_TENSORS}" =~ ^[01]$ ]] || {
-                fail "CATCCOS_DEBUG_DUMP_TENSORS must be 0 or 1"
-            }
-            [[ "${CATCCOS_DEBUG_DUMP_SELECTED}" =~ ^[01]$ ]] || {
-                fail "CATCCOS_DEBUG_DUMP_SELECTED must be 0 or 1"
-            }
-            [[ "${CATCCOS_DEBUG_DUMP_WEIGHTS}" =~ ^[01]$ ]] || {
-                fail "CATCCOS_DEBUG_DUMP_WEIGHTS must be 0 or 1"
-            }
-            mkdir -p "${CATCCOS_DEBUG_HOST_DIR}"
-            [[ -w "${CATCCOS_DEBUG_HOST_DIR}" ]] || {
-                fail "CatCCOS debug directory is not writable"
-            }
-        fi
+        [[ "${CATCCOS_SYNC_DEVICE}" =~ ^[01]$ ]] || {
+            fail "CATCCOS_SYNC_DEVICE must be 0 or 1"
+        }
         ;;
     *) fail "MODE must be native or catccos" ;;
 esac
@@ -160,17 +112,8 @@ for device_path in /dev/davinci_manager /dev/hisi_hdc; do
 done
 
 parallel_size="${#device_ids[@]}"
-if [[ "${MODE}" == "catccos" ]]; then
-    if [[ -z "${CATCCOS_MINM}" ]]; then
-        if (( parallel_size == 1 )); then
-            CATCCOS_MINM=1
-        else
-            CATCCOS_MINM=64
-        fi
-    fi
-    [[ "${CATCCOS_MINM}" =~ ^[1-9][0-9]*$ ]] || {
-        fail "CATCCOS_MINM must be a positive integer"
-    }
+if [[ "${MODE}" == "catccos" ]] && (( parallel_size < 2 )); then
+    fail "CatCCOS mode requires at least two NPUs with expert parallelism"
 fi
 
 topology_mounts=()
@@ -224,39 +167,20 @@ docker_env=()
 source_mounts=()
 if [[ "${MODE}" == "catccos" ]]; then
     source_mounts=(
-        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/__init__.py:/vllm-workspace/vllm-ascend/vllm_ascend/__init__.py:ro"
-        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/envs.py:/vllm-workspace/vllm-ascend/vllm_ascend/envs.py:ro"
-        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/catccos_patch.py:/vllm-workspace/vllm-ascend/vllm_ascend/catccos_patch.py:ro"
-        -v "${VLLM_ASCEND_SOURCE}/vllm_ascend/catccos_debug.py:/vllm-workspace/vllm-ascend/vllm_ascend/catccos_debug.py:ro"
+        -v "${VLLM_ASCEND_SOURCE}:/vllm-workspace/vllm-ascend:ro"
         -v "${CATCCOS_SOURCE}:/workspace/catccos:ro"
     )
     docker_env+=(
-        -e VLLM_ASCEND_CATCCOS=1
-        -e VLLM_ASCEND_CATCCOS_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so
-        -e VLLM_ASCEND_CATCCOS_UTILS_PATH=/workspace/catccos/examples/utils
-        -e "VLLM_ASCEND_CATCCOS_IPPORT=${CATCCOS_IPPORT}"
-        -e "VLLM_ASCEND_CATCCOS_MEM=${CATCCOS_MEM}"
-        -e "VLLM_ASCEND_CATCCOS_MINM=${CATCCOS_MINM}"
-        -e "VLLM_ASCEND_CATCCOS_WEIGHT_QUANT_BACKEND=${CATCCOS_WEIGHT_QUANT_BACKEND}"
         -e LD_LIBRARY_PATH=/workspace/catccos/build_torch_a5/lib:/workspace/catccos/3rdparty/shmem/install/shmem/lib
     )
-    if [[ -n "${CATCCOS_DEBUG_HOST_DIR}" ]]; then
-        source_mounts+=(
-            -v "${CATCCOS_DEBUG_HOST_DIR}:/catccos-debug"
-        )
-        docker_env+=(
-            -e VLLM_ASCEND_CATCCOS_DEBUG_DIR=/catccos-debug
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_TOKEN_COUNTS=${CATCCOS_DEBUG_TOKEN_COUNTS}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_MOE_INSTANCE_IDS=${CATCCOS_DEBUG_MOE_INSTANCE_IDS}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_ORDER=${CATCCOS_DEBUG_ORDER}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_MAX_CALLS_PER_LAYER=${CATCCOS_DEBUG_MAX_CALLS_PER_LAYER}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_COSINE_THRESHOLD=${CATCCOS_DEBUG_COSINE_THRESHOLD}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD=${CATCCOS_DEBUG_RELATIVE_L2_THRESHOLD}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_TENSORS=${CATCCOS_DEBUG_DUMP_TENSORS}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_SELECTED=${CATCCOS_DEBUG_DUMP_SELECTED}"
-            -e "VLLM_ASCEND_CATCCOS_DEBUG_DUMP_WEIGHTS=${CATCCOS_DEBUG_DUMP_WEIGHTS}"
-        )
+    catccos_sync_json=false
+    if [[ "${CATCCOS_SYNC_DEVICE}" == "1" ]]; then
+        catccos_sync_json=true
     fi
+    serve_args+=(
+        --additional-config
+        "{\"enable_fused_mc2\":1,\"fused_mc2_backend\":\"catccos\",\"catccos_library_path\":\"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so\",\"catccos_store_url\":\"${CATCCOS_IPPORT}\",\"catccos_local_mem_size\":${CATCCOS_MEM},\"catccos_max_tokens_per_rank\":${CATCCOS_MAX_TOKENS_PER_RANK},\"catccos_sync_after_launch\":${catccos_sync_json}}"
+    )
 fi
 if (( parallel_size > 1 )); then
     serve_args+=(
@@ -272,6 +196,9 @@ fi
 if (( enable_ep == 1 )); then
     serve_args+=(--enable-expert-parallel)
 fi
+if [[ "${MODE}" == "catccos" ]] && (( enable_ep != 1 )); then
+    fail "CatCCOS mode requires ENABLE_EXPERT_PARALLEL=1 (or auto)"
+fi
 
 if docker container inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
     if [[ "${RECREATE}" == "1" ]]; then
@@ -284,14 +211,6 @@ fi
 echo "Starting ${CONTAINER_NAME} in ${MODE} mode with TP=${parallel_size}, EP=${enable_ep}"
 echo "Image: ${IMAGE}"
 echo "NPUs: ${NPU_DEVICES}"
-if [[ "${MODE}" == "catccos" ]]; then
-    echo "CatCCOS minimum token rows: ${CATCCOS_MINM}"
-    if [[ -n "${CATCCOS_DEBUG_HOST_DIR}" ]]; then
-        echo "CatCCOS probe output: ${CATCCOS_DEBUG_HOST_DIR}"
-        echo "CatCCOS probe token rows: ${CATCCOS_DEBUG_TOKEN_COUNTS}"
-        echo "CatCCOS probe order: ${CATCCOS_DEBUG_ORDER}"
-    fi
-fi
 
 docker run -d \
     --name "${CONTAINER_NAME}" \

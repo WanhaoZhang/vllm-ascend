@@ -139,6 +139,77 @@ PY
 export PROBE_DUMP_WEIGHTS=0
 ```
 
+## 实测记录：`stage1-20260828-180440`
+
+### 运行配置
+
+| 项目 | 值 |
+| --- | --- |
+| 模型 | Qwen3-30B-A3B-Instruct-2507 |
+| 请求 | 固定 dragon/Perg prompt，`temperature=0`、`seed=42`、`max_tokens=1` |
+| Probe 层 | 第一个 MoE 实例，`moe_instance_id=0` |
+| Token rows | `M=177` |
+| 并行配置 | `TP=4`、`EP=4` |
+| MoE 通信类型 | `ALLGATHER` |
+| 外层动作 | `tp-all-reduce` |
+| 执行顺序 | `native-catccos` |
+| 结果目录 | `/home/z00956592/catccos-probe-results/stage1-20260828-180440/native-catccos` |
+| 归档 | `/home/z00956592/catccos-probe-results/stage1-20260828-180440.tar.gz` |
+
+### 各 rank 原始指标
+
+| Rank | 比较 | Cosine | Relative L2 | Norm ratio |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | `native_local_vs_native_reduced` | 0.595495 | 2.43774 | 2.89710 |
+| 0 | `native_local_vs_catccos_pre_reduce` | 0.595009 | 2.34852 | 2.80176 |
+| 0 | `native_reduced_vs_catccos_pre_reduce` | 0.999293 | 0.0442707 | 0.967090 |
+| 0 | `native_reduced_vs_catccos_post_reduce` | 0.999329 | 2.86862 | 3.86805 |
+| 0 | `catccos_pre_reduce_vs_catccos_post_reduce` | 0.999808 | 2.99968 | 3.99968 |
+| 1 | `native_local_vs_native_reduced` | 0.624699 | 2.36321 | 2.85521 |
+| 1 | `native_local_vs_catccos_pre_reduce` | 0.624810 | 2.27461 | 2.76124 |
+| 1 | `native_reduced_vs_catccos_pre_reduce` | 0.999293 | 0.0442707 | 0.967090 |
+| 1 | `native_reduced_vs_catccos_post_reduce` | 0.999329 | 2.86862 | 3.86805 |
+| 1 | `catccos_pre_reduce_vs_catccos_post_reduce` | 0.999808 | 2.99968 | 3.99968 |
+| 2 | `native_local_vs_native_reduced` | 0.615402 | 2.19983 | 2.66922 |
+| 2 | `native_local_vs_catccos_pre_reduce` | 0.614701 | 2.11813 | 2.58051 |
+| 2 | `native_reduced_vs_catccos_pre_reduce` | 0.999294 | 0.0445467 | 0.966769 |
+| 2 | `native_reduced_vs_catccos_post_reduce` | 0.999328 | 2.86867 | 3.86809 |
+| 2 | `catccos_pre_reduce_vs_catccos_post_reduce` | 0.999793 | 3.00108 | 4.00105 |
+| 3 | `native_local_vs_native_reduced` | 0.713983 | 1.52555 | 2.06943 |
+| 3 | `native_local_vs_catccos_pre_reduce` | 0.714040 | 1.46578 | 2.00186 |
+| 3 | `native_reduced_vs_catccos_pre_reduce` | 0.999281 | 0.0443203 | 0.967348 |
+| 3 | `native_reduced_vs_catccos_post_reduce` | 0.999323 | 2.86918 | 3.86860 |
+| 3 | `catccos_pre_reduce_vs_catccos_post_reduce` | 0.999754 | 2.99925 | 3.99918 |
+
+### 聚合结果
+
+| 比较 | Mean cosine | Mean relative L2 | 观察 |
+| --- | ---: | ---: | --- |
+| `native_reduced` vs `catccos_pre_reduce` | 0.999290 | 0.0443521 | CatCCOS 直接输出与 native 完整归约输出高度对齐；各 rank 的 norm ratio 为 0.966769–0.967348 |
+| `native_reduced` vs `catccos_post_reduce` | 0.999327 | 2.86878 | 外层 TP all-reduce 后，CatCCOS 输出幅度约为 native 完整输出的 3.868 倍 |
+| `catccos_pre_reduce` vs `catccos_post_reduce` | 约 0.99979 | 约 3.000 | norm ratio 为 3.99918–4.00105，与 `TP=4` 的重复求和特征一致 |
+
+### 结论
+
+本次结果支持以下判断：
+
+1. `ALLGATHER` native 路径的 `native_local` 是各 rank 的部分 expert 贡献，
+   必须经过外层 TP all-reduce 才得到 `native_reduced`；
+2. `catccos_pre_reduce` 已经与 `native_reduced` 对齐，而不是与
+   `native_local` 对齐，说明 CatCCOS fused dispatch-FFN-combine 已经返回跨 rank
+   合并后的完整输出；
+3. 对 `catccos_pre_reduce` 再执行 TP=4 all-reduce 后，norm ratio 几乎精确变为
+   4、relative L2 几乎精确变为 3。这是完整结果被四个 rank 再求和一次的特征；
+4. 当前将 CatCCOS 输出继续按 `ALLGATHER` 局部输出处理，会引入重复归约。
+   CatCCOS 路径需要向外层显式表达“输出已经归约”的语义；
+5. `native_reduced` 与 `catccos_pre_reduce` 仍有约 4.4% relative L2 差异。
+   该差异不能仅凭本次结果认定为正常 MXFP8 量化误差，仍需检查权重量化、
+   scale、布局和 kernel 数值精度。
+
+本次结论只覆盖第一个 MoE 层、prefill `M=177`、`TP=4/EP=4`、
+`ALLGATHER` 和固定单请求场景；不覆盖 decode、其他层、其他 batch size、并发或
+MC2/FUSED_MC2 路径。
+
 ## 非默认参数
 
 | 变量 | 默认值 | 说明 |

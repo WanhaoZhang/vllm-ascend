@@ -120,3 +120,19 @@ Expanded the existing-container documentation into a Chinese field runbook:
 M-window discovery, pre-request profile checks, all four cold-start orders,
 result completeness checks, JSONL and tensor-dump inspection, the diagnosis
 matrix, decode follow-up, and copying results out before container removal.
+
+### 2026-08-29 CatCCOS reduction contract and Docker validation runbook
+
+Recorded the TP4 layer0 evidence showing that CatCCOS direct output aligns
+with native's fully reduced output, while the old ALLGATHER outer reduction
+multiplies its norm by approximately four. Commit `b0c8ff6e0` added a
+per-call reduction contract: successful CatCCOS calls skip the outer TP
+all-reduce, while native fallback retains it. Commit `3059ddd2f` added an
+explicit production-action field, skip log, and decode-M=1 probe controls.
+
+Added `CATCCOS_DOCKER_VALIDATION_RUNBOOK.md` as the ordered acceptance path
+inside an existing container. It separates reduction wiring, layer0 numeric
+alignment, cross-rank consistency, prefill/decode token parity, GSM8K
+accuracy, shape/parallelism generalization, and performance gates so a
+healthy endpoint or one matching prompt cannot be mistaken for complete
+correctness evidence.

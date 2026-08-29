@@ -21,6 +21,9 @@ The integration currently targets the official
   four-order validation matrix, JSONL output, and first-mismatch tensor dump.
 - [CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md](CATCCOS_FIRST_LAYER_REDUCTION_PROBE.md):
   first-layer native-local/reduced and CatCCOS pre/post-reduction probe.
+- [CATCCOS_DOCKER_VALIDATION_RUNBOOK.md](CATCCOS_DOCKER_VALIDATION_RUNBOOK.md):
+  step-by-step layer0, prefill/decode, end-to-end accuracy, generalization,
+  and performance gates inside an already running Docker container.
 - [CHANGELOG.md](CHANGELOG.md): purpose and validation status of every commit
   in this integration branch.
 - `run_docker.sh`: launches either the native or CatCCOS service.

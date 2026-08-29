@@ -20,6 +20,7 @@ VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE:-}"
 CATCCOS_SOURCE="${CATCCOS_SOURCE:-}"
 CATCCOS_IPPORT="${CATCCOS_IPPORT:-tcp://127.0.0.1:27020}"
 CATCCOS_MEM="${CATCCOS_MEM:-1073741824}"
+CATCCOS_MIN_TOKENS="${CATCCOS_MIN_TOKENS:-64}"
 CATCCOS_MAX_TOKENS_PER_RANK="${CATCCOS_MAX_TOKENS_PER_RANK:-512}"
 CATCCOS_SYNC_DEVICE="${CATCCOS_SYNC_DEVICE:-1}"
 
@@ -41,8 +42,9 @@ Optional environment variables:
 
 CatCCOS mode:
   VLLM_ASCEND_SOURCE and CATCCOS_SOURCE are required. Optional variables are
-  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MAX_TOKENS_PER_RANK, and
-  CATCCOS_SYNC_DEVICE (0 or 1, post-launch synchronization; default 1).
+  CATCCOS_IPPORT, CATCCOS_MEM, CATCCOS_MIN_TOKENS (default 64),
+  CATCCOS_MAX_TOKENS_PER_RANK, and CATCCOS_SYNC_DEVICE (0 or 1,
+  post-launch synchronization; default 1).
 
 ENABLE_EXPERT_PARALLEL accepts auto, 0, or 1. In auto mode it is enabled
 when more than one NPU is selected. Set RECREATE=1 to replace an existing
@@ -82,6 +84,9 @@ case "${MODE}" in
         catccos_library="${CATCCOS_SOURCE}/build_torch_a5/lib/libcatccos_torch.so"
         [[ -f "${catccos_library}" ]] || {
             fail "CatCCOS extension is missing: ${catccos_library}"
+        }
+        [[ "${CATCCOS_MIN_TOKENS}" =~ ^[1-9][0-9]*$ ]] || {
+            fail "CATCCOS_MIN_TOKENS must be a positive integer"
         }
         [[ "${CATCCOS_MAX_TOKENS_PER_RANK}" =~ ^[1-9][0-9]*$ ]] || {
             fail "CATCCOS_MAX_TOKENS_PER_RANK must be a positive integer"
@@ -179,7 +184,7 @@ if [[ "${MODE}" == "catccos" ]]; then
     fi
     serve_args+=(
         --additional-config
-        "{\"enable_fused_mc2\":1,\"fused_mc2_backend\":\"catccos\",\"catccos_library_path\":\"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so\",\"catccos_store_url\":\"${CATCCOS_IPPORT}\",\"catccos_local_mem_size\":${CATCCOS_MEM},\"catccos_max_tokens_per_rank\":${CATCCOS_MAX_TOKENS_PER_RANK},\"catccos_sync_after_launch\":${catccos_sync_json}}"
+        "{\"enable_fused_mc2\":1,\"fused_mc2_backend\":\"catccos\",\"catccos_library_path\":\"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so\",\"catccos_store_url\":\"${CATCCOS_IPPORT}\",\"catccos_local_mem_size\":${CATCCOS_MEM},\"catccos_min_tokens\":${CATCCOS_MIN_TOKENS},\"catccos_max_tokens_per_rank\":${CATCCOS_MAX_TOKENS_PER_RANK},\"catccos_sync_after_launch\":${catccos_sync_json}}"
     )
 fi
 if (( parallel_size > 1 )); then

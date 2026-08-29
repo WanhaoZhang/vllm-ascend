@@ -11,6 +11,7 @@ Qwen3-30B-A3B 请求。第一次只做 correctness smoke，不采集性能数据
 - BF16 未量化模型；
 - eager 模式；
 - 首次运行启用 `catccos_sync_after_launch=true`。
+- 首轮设置 `catccos_min_tokens=64` 和并发 1，使小 M decode 回退 native MC2。
 
 ## 路径一：从宿主机启动新容器（推荐）
 
@@ -41,6 +42,8 @@ MODE=catccos \
 CONTAINER_NAME=megamoe-catccos-formal \
 PORT=18081 \
 NPU_DEVICES=0,1,2,3 \
+MAX_NUM_SEQS=1 \
+CATCCOS_MIN_TOKENS=64 \
 CATCCOS_SYNC_DEVICE=1 \
 VLLM_ASCEND_SOURCE="${VLLM_ASCEND_SOURCE}" \
 CATCCOS_SOURCE="${CATCCOS_SOURCE}" \
@@ -93,14 +96,14 @@ vllm serve /model \
   --distributed-executor-backend mp \
   --max-model-len 4096 \
   --max-num-batched-tokens 4096 \
-  --max-num-seqs 8 \
+  --max-num-seqs 1 \
   --gpu-memory-utilization 0.70 \
   --no-enable-prefix-caching \
   --enforce-eager \
   --host 0.0.0.0 \
   --port 18081 \
   --additional-config \
-  '{"enable_fused_mc2":1,"fused_mc2_backend":"catccos","catccos_library_path":"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so","catccos_store_url":"tcp://127.0.0.1:27020","catccos_local_mem_size":1073741824,"catccos_max_tokens_per_rank":512,"catccos_sync_after_launch":true}'
+  '{"enable_fused_mc2":1,"fused_mc2_backend":"catccos","catccos_library_path":"/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so","catccos_store_url":"tcp://127.0.0.1:27020","catccos_local_mem_size":1073741824,"catccos_min_tokens":64,"catccos_max_tokens_per_rank":512,"catccos_sync_after_launch":true}'
 ```
 
 使用两张卡时，把 `ASCEND_RT_VISIBLE_DEVICES` 和
@@ -120,7 +123,7 @@ curl --fail --silent --show-error \
     "model": "Qwen3-30B-A3B",
     "messages": [{
       "role": "user",
-      "content": "What is 17 * 23? Return only the number."
+      "content": "Answer the following question. Return only the number. The great dragon, Perg, sat high atop mount Farbo, breathing fire upon anything within a distance of 1000 feet. Polly could throw the gold javelin for a distance of 400 feet. When Polly held the sapphire gemstone, she could throw the javelin three times farther. If holding the gemstone, how far outside the reach of the dragon's flames could Polly stand and still hit the dragon?"
     }],
     "temperature": 0,
     "seed": 42,
@@ -129,7 +132,9 @@ curl --fail --silent --show-error \
   }' | tee /tmp/catccos-formal-e2e.json
 ```
 
-预期返回 `391`，并且没有超时、空输出或 worker 退出。
+预期返回 `200`，并且没有超时、空输出或 worker 退出。这个长 prompt 用于确保
+prefill 的 `M` 超过 64；不要改回短算术 prompt 后仍把它当成 CatCCOS prefill
+证据。
 
 ## 确认实际走了 CatCCOS
 
@@ -137,7 +142,7 @@ curl --fail --silent --show-error \
 
 ```bash
 docker logs megamoe-catccos-formal 2>&1 | grep -E \
-  'Initialized CatCCOS|Converted CatCCOS|Executed CatCCOS through the formal FusedMC2 backend'
+  'Initialized CatCCOS|Executed CatCCOS through the formal FusedMC2 backend|CatCCOS is disabled below M=64'
 ```
 
 已有容器路径直接检查服务终端。必须至少看到每个 rank 初始化 CatCCOS 和转换
@@ -147,7 +152,17 @@ MXFP8 权重；请求后还必须出现下面的执行日志：
 Executed CatCCOS through the formal FusedMC2 backend
 ```
 
-这些信息使用 `logger.info_once`，每个 worker 最多打印一次。
+decode 开始后还应看到：
+
+```text
+CatCCOS is disabled below M=64; using native MoE for M=1
+```
+
+这两条信息合在一起证明大 M prefill 使用 CatCCOS，而单请求 `M=1` decode
+选择 native MC2。它们使用 `logger.info_once`，每个 worker 最多打印一次。
+
+这是按当前 batch 的 token 行数 `M` 做的阶段性回退，不是独立的 prefill/decode
+类型开关。首轮保持并发 1；若并发 decode 聚合到 `M>=64`，仍会使用 CatCCOS。
 
 如果日志没有 CatCCOS 初始化信息，不能把 HTTP 成功算作通过；它可能走了 native
 fallback。若服务失败，先保存：
@@ -162,14 +177,17 @@ docker logs --tail 500 megamoe-catccos-formal \
 | 项目 | 通过条件 |
 | --- | --- |
 | 启动 | 所有 worker 完成 CatCCOS 初始化，服务健康 |
-| 接线 | 日志确认请求执行了 formal FusedMC2 CatCCOS 路径 |
-| prefill/decode | `max_tokens=32` 请求完成，无卡死或 worker 退出 |
-| 输出 | 固定贪心请求得到 `391` |
+| prefill | 日志确认执行了 formal FusedMC2 CatCCOS 路径 |
+| decode fallback | 日志确认 `M=1` 使用 native MoE |
+| 完整请求 | `max_tokens=32` 请求完成，无卡死或 worker 退出 |
+| 输出 | 固定贪心请求得到 `200` |
 
 这只证明一个端到端 smoke。通过后再分别运行 native/CatCCOS 固定请求 A/B、
-GSM8K smoke 和 layer0 正式路径 tensor dump。性能测试前应关闭后同步：
+GSM8K smoke 和 layer0 正式路径 tensor dump。恢复 CatCCOS decode 时，把阈值
+改为 1；性能测试前还应关闭后同步：
 
 ```bash
+CATCCOS_MIN_TOKENS=1
 CATCCOS_SYNC_DEVICE=0
 ```
 

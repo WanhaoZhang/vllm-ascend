@@ -305,8 +305,16 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    if _catccos_backend_enabled() and num_tokens <= mc2_tokens_capacity and world_size > 1:
-        return MoECommType.FUSED_MC2
+    if _catccos_backend_enabled():
+        min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
+        if min_tokens <= num_tokens <= mc2_tokens_capacity and world_size > 1:
+            return MoECommType.FUSED_MC2
+        if num_tokens < min_tokens:
+            logger.info_once(
+                "CatCCOS is disabled below M=%d; using native MoE for M=%d",
+                min_tokens,
+                num_tokens,
+            )
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:

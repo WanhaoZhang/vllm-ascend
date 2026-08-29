@@ -15,6 +15,14 @@ first formal FusedMC2 request from either the host launcher or an already
 running container, and added a one-time execution log to distinguish a real
 CatCCOS request from startup-only weight preparation.
 
+### 2026-08-29 native decode fallback for prefill validation
+
+Added `catccos_min_tokens` to the formal A5 communication selector. The
+example launcher defaults it to 64, routing small decode batches through
+native MC2 while retaining CatCCOS FusedMC2 for larger prefill batches. The
+threshold is configurable because sufficiently large batched decode can cross
+it; correctness validation therefore uses `MAX_NUM_SEQS=1`.
+
 ## vLLM-Ascend repository
 
 ### `d20d8714` — Qwen3 MoE Docker launcher

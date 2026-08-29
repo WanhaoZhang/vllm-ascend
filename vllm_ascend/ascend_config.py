@@ -190,6 +190,7 @@ class AscendConfig:
         self.catccos_local_mem_size = additional_config.get(
             "catccos_local_mem_size", ascend_envs.VLLM_ASCEND_CATCCOS_MEM
         )
+        self.catccos_min_tokens = additional_config.get("catccos_min_tokens", ascend_envs.VLLM_ASCEND_CATCCOS_MINM)
         self.catccos_max_tokens_per_rank = additional_config.get("catccos_max_tokens_per_rank", 512)
         self.catccos_sync_after_launch = additional_config.get(
             "catccos_sync_after_launch", ascend_envs.VLLM_ASCEND_CATCCOS_SYNC_DEVICE
@@ -198,8 +199,12 @@ class AscendConfig:
             raise ValueError(f"fused_mc2_backend must be auto, cann, or catccos, got {self.fused_mc2_backend!r}")
         if self.fused_mc2_backend == "catccos":
             self.enable_fused_mc2 = 1
-            if self.catccos_local_mem_size <= 0 or self.catccos_max_tokens_per_rank <= 0:
-                raise ValueError("CatCCOS memory and token capacity must be positive")
+            if (
+                self.catccos_local_mem_size <= 0
+                or self.catccos_min_tokens <= 0
+                or self.catccos_max_tokens_per_rank <= 0
+            ):
+                raise ValueError("CatCCOS memory and token limits must be positive")
             if not vllm_config.parallel_config.enable_expert_parallel:
                 raise ValueError("CatCCOS requires expert parallelism")
             if vllm_config.model_config is not None and not vllm_config.model_config.enforce_eager:

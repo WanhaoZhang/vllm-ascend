@@ -58,6 +58,8 @@ MODE=catccos \
 CONTAINER_NAME=megamoe-catccos \
 PORT=18081 \
 NPU_DEVICES=0,1 \
+MAX_NUM_SEQS=1 \
+CATCCOS_MIN_TOKENS=64 \
 VLLM_ASCEND_SOURCE="$VLLM_ASCEND_SOURCE" \
 CATCCOS_SOURCE="$CATCCOS_SOURCE" \
 MODEL_PATH="$MODEL_PATH" \
@@ -67,6 +69,11 @@ bash examples/megamoe_qwen3/run_docker.sh
 The launcher enables post-launch device synchronization by default for the
 first correctness run. Set `CATCCOS_SYNC_DEVICE=0` only after correctness is
 accepted and before measuring performance.
+
+It also defaults `CATCCOS_MIN_TOKENS=64`, so small decode batches use native
+MC2 while a larger prefill uses CatCCOS. Keep `MAX_NUM_SEQS=1` for this
+prefill-only validation. Set `CATCCOS_MIN_TOKENS=1` only when validating the
+CatCCOS decode path.
 
 The CatCCOS extension must already exist at
 `$CATCCOS_SOURCE/build_torch_a5/lib/libcatccos_torch.so`. See the 950DT guide
@@ -86,7 +93,10 @@ curl http://127.0.0.1:18081/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{
     "model": "Qwen3-30B-A3B",
-    "messages": [{"role": "user", "content": "What is 17 * 23?"}],
+    "messages": [{
+      "role": "user",
+      "content": "The dragon can reach 1000 feet. Polly throws 400 feet normally and three times as far with a gemstone. How far outside the dragon's reach can she stand and still hit it? Return only the number."
+    }],
     "temperature": 0,
     "max_tokens": 64,
     "chat_template_kwargs": {"enable_thinking": false}
@@ -98,7 +108,7 @@ path:
 
 ```bash
 docker logs megamoe-catccos 2>&1 | grep -E \
-  'Initialized CatCCOS|Converted CatCCOS|Executed CatCCOS through the formal FusedMC2 backend'
+  'Initialized CatCCOS|Executed CatCCOS through the formal FusedMC2 backend|CatCCOS is disabled below M=64'
 ```
 
 ## Scope and known risk

@@ -105,12 +105,14 @@ class TestAscendConfig(TestBase):
         test_vllm_config.model_config = self._make_model_config()
         test_vllm_config.additional_config = {
             "fused_mc2_backend": "catccos",
+            "catccos_min_tokens": 64,
             "catccos_sync_after_launch": True,
         }
 
         ascend_config = init_ascend_config(test_vllm_config)
 
         self.assertEqual(ascend_config.enable_fused_mc2, 1)
+        self.assertEqual(ascend_config.catccos_min_tokens, 64)
         self.assertTrue(ascend_config.catccos_sync_after_launch)
 
     @_clean_up_ascend_config

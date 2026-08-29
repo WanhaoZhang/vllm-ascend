@@ -8,10 +8,20 @@ PORT="${PORT:-28001}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-qwen3-catccos}"
 PROBE_OUTPUT_ROOT="${PROBE_OUTPUT_ROOT:-/home/z00956592/catccos-probe-results}"
 PROBE_TOKEN_COUNTS="${PROBE_TOKEN_COUNTS:-177}"
+PROBE_EXPECTED_PROMPT_TOKENS="${PROBE_EXPECTED_PROMPT_TOKENS:-177}"
+PROBE_MAX_TOKENS="${PROBE_MAX_TOKENS:-1}"
 PROBE_EXPECTED_RANKS="${PROBE_EXPECTED_RANKS:-4}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-600}"
 
 : "${PROBE_RUN_ID:?Use the same PROBE_RUN_ID as the server terminal}"
+[[ "${PROBE_EXPECTED_PROMPT_TOKENS}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: PROBE_EXPECTED_PROMPT_TOKENS must be positive" >&2
+    exit 1
+}
+[[ "${PROBE_MAX_TOKENS}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ERROR: PROBE_MAX_TOKENS must be positive" >&2
+    exit 1
+}
 
 probe_dir="${PROBE_OUTPUT_ROOT}/${PROBE_RUN_ID}/native-catccos"
 response_path="${probe_dir}/chat-completion-response.json"
@@ -36,7 +46,7 @@ curl --fail --silent --show-error "http://127.0.0.1:${PORT}/v1/chat/completions"
     "role": "user",
     "content": "Answer the following question.The last line of the response should follow this format: \"answer:\$ANSWER\" (without quotes), where ANSWER is a number. Let's think step by step.\n\nQuestion: The great dragon, Perg, sat high atop mount Farbo, breathing fire upon anything within a distance of 1000 feet.  Polly could throw the gold javelin, the only known weapon that could sleigh the dragon, for a distance of 400 feet, well within the reach of the dragon's flames.  But when Polly held the sapphire gemstone, she could throw the javelin three times farther than when not holding the gemstone. If holding the gemstone, how far outside of the reach of the dragon's flames could Polly stand and still hit the dragon with the gold javelin?"
   }],
-  "max_tokens": 1,
+  "max_tokens": ${PROBE_MAX_TOKENS},
   "temperature": 0,
   "seed": 42
 }
@@ -53,9 +63,8 @@ if "error" in response:
 print(response["usage"]["prompt_tokens"])
 ' "${response_path}")"
 
-if [[ ",${PROBE_TOKEN_COUNTS}," != *",${actual_prompt_tokens},"* ]]; then
-    echo "ERROR: request used M=${actual_prompt_tokens}, but PROBE_TOKEN_COUNTS=${PROBE_TOKEN_COUNTS}" >&2
-    echo "No selected probe may have run; update PROBE_TOKEN_COUNTS and restart the server." >&2
+if [[ "${actual_prompt_tokens}" != "${PROBE_EXPECTED_PROMPT_TOKENS}" ]]; then
+    echo "ERROR: request used ${actual_prompt_tokens} prompt tokens; expected ${PROBE_EXPECTED_PROMPT_TOKENS}" >&2
     exit 1
 fi
 

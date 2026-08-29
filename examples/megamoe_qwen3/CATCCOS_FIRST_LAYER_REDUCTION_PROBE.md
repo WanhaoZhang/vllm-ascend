@@ -210,11 +210,79 @@ export PROBE_DUMP_WEIGHTS=0
 `ALLGATHER` 和固定单请求场景；不覆盖 decode、其他层、其他 batch size、并发或
 MC2/FUSED_MC2 路径。
 
+## 接入修复与快速验收
+
+修复不修改全局 `moe_comm_type`，而是在每个 MoE layer 的 runner 上记录当前
+调用返回值是否已经归约。这个标志每次进入 `forward_impl` 时先清零，只在
+CatCCOS kernel 成功返回后置位，并在外层 runner 消费一次后再次清零。
+
+| 当前路径 | CatCCOS 已归约标志 | 外层动作 |
+| --- | --- | --- |
+| native 或小 M fallback | `false` | 保留原 TP all-reduce |
+| CatCCOS 正常执行 | `true` | 只截断 padding，不再 all-reduce |
+| probe 返回 CatCCOS | `true` | 诊断副本仍 all-reduce；真实返回值不再 all-reduce |
+| probe `native-native` | `false` | 保留原 TP all-reduce |
+
+先运行不需要 NPU kernel 的契约单测：
+
+```bash
+.venv/bin/python -m unittest discover \
+  -s tests/ut -p test_catccos_a5.py -v
+```
+
+然后换新的 `PROBE_RUN_ID` 重跑本页的 `M=177` TP4 probe。修复后的每个 rank
+应打印：
+
+```text
+default_outer=tp-all-reduce production_outer=identity
+```
+
+服务日志还应出现一次：
+
+```text
+Skipping outer TP all-reduce for the already-reduced CatCCOS A5 output
+```
+
+四阶段诊断中的 `catccos_post_reduce` 仍应接近 4 倍，因为它是故意对副本执行
+旧的默认动作；它不再代表生产路径的真实输出。验收时同时要求：
+
+1. `native_reduced_vs_catccos_pre_reduce` 继续保持高 cosine，norm ratio 接近 1；
+2. 摘要显示 `production_outer=identity`；
+3. 固定请求成功返回，服务日志没有 collective 超时或各 rank 分歧。
+
+专门验证 decode `M=1` 时，服务端必须设置 `CATCCOS_MINM=1`，并让客户端生成
+至少两个 token，使 prefill 后真正发生一次 decode forward：
+
+```bash
+export PROBE_RUN_ID=decode-m1-$(date +%Y%m%d-%H%M%S)
+export PROBE_TOKEN_COUNTS=1
+export CATCCOS_MINM=1
+bash examples/megamoe_qwen3/run_first_layer_reduction_probe.sh
+```
+
+第二个终端执行：
+
+```bash
+export PROBE_RUN_ID=<与服务端相同>
+export PROBE_TOKEN_COUNTS=1
+export PROBE_MAX_TOKENS=2
+bash examples/megamoe_qwen3/send_first_layer_probe_request.sh
+```
+
+正确性 probe 通过后必须关闭全部 `VLLM_ASCEND_CATCCOS_DEBUG_*` 环境变量并重启
+服务，才能进行性能测试。使用 `benchmark.sh` 对 native/CatCCOS 采用完全相同的
+输入长度、输出长度、并发数、warmup 和请求数，分别记录 TTFT、TPOT/ITL、总
+token throughput、p50/p99 与 NPU HBM。至少分开测试 prefill 主导、decode 主导和
+混合并发三类负载；`CATCCOS_MINM>1` 时，decode 性能实际上属于 native fallback，
+不能计入 CatCCOS 加速结果。
+
 ## 非默认参数
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PROBE_TOKEN_COUNTS` | `177` | 选择的 token-row 数；改变后必须使用匹配请求 |
+| `PROBE_EXPECTED_PROMPT_TOKENS` | `177` | 固定请求经 chat template 后应得到的 prompt token 数 |
+| `PROBE_MAX_TOKENS` | `1` | 请求生成长度；探测 decode `M=1` 时至少设为 `2` |
 | `PROBE_MOE_INSTANCE_IDS` | `0` | 只探第一层；逗号分隔可选择多层 |
 | `PROBE_EXPECTED_RANKS` | `4` | 客户端等待的 rank dump 数量 |
 | `PROBE_DUMP_SELECTED` | `1` | 即使低于 mismatch 阈值也保存所选调用 |

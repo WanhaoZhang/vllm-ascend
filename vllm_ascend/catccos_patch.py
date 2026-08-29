@@ -336,6 +336,7 @@ def _run_catccos_probe(
     torch.npu.synchronize()
 
     first_backend, second_backend = config.order.split("-")
+    returned_backend = "catccos" if "catccos" in {first_backend, second_backend} else first_backend
     first_output = _run_probe_backend(
         first_backend,
         layer,
@@ -408,6 +409,7 @@ def _run_catccos_probe(
         world_size = torch.distributed.get_world_size()
     moe_instance_id = getattr(layer, "moe_instance_id", -1)
     layer_name = str(getattr(layer, "layer_name", f"moe-{moe_instance_id}"))
+    parallel_context = _probe_parallel_metadata()
     record = {
         "schema_version": 2,
         "rank": rank,
@@ -426,13 +428,17 @@ def _run_catccos_probe(
         "order": config.order,
         "first_backend": first_backend,
         "second_backend": second_backend,
+        "returned_backend": returned_backend,
+        "production_outer_reduction": (
+            "identity" if returned_backend == "catccos" else parallel_context["outer_reduction"]
+        ),
         "cosine_threshold": config.cosine_threshold,
         "relative_l2_threshold": config.relative_l2_threshold,
         "significant_mismatch": mismatch,
         "metrics": metrics,
         "post_reduce_metrics": post_reduce_metrics,
         "stage_metrics": stage_metrics,
-        "parallel_context": _probe_parallel_metadata(),
+        "parallel_context": parallel_context,
         "input": tensor_metadata(hidden_states),
         "router_logits": tensor_metadata(router_logits),
         "expert_idx": tensor_metadata(expert_idx),
@@ -519,6 +525,7 @@ def _catccos_maybe_reduce_final_output(
 ) -> torch.Tensor:
     if getattr(self, "_catccos_a5_output_is_reduced", False):
         self._catccos_a5_output_is_reduced = False
+        logger.info_once("Skipping outer TP all-reduce for the already-reduced CatCCOS A5 output")
         return states[..., :trunc_size]
     assert _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT is not None
     return _ORIGINAL_MAYBE_REDUCE_FINAL_OUTPUT(self, states, trunc_size)

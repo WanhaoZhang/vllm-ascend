@@ -7,7 +7,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 METRIC_NAMES = (
     "native_local_vs_native_reduced",
     "native_local_vs_catccos_pre_reduce",
@@ -41,7 +40,9 @@ def _print_record(record: dict[str, Any]) -> None:
     print(
         f"rank={record['rank']} ep={record['ep_rank']}/{record['ep_world_size']} "
         f"tp={context['tp_rank']}/{context['tp_world_size']} layer={record['moe_instance_id']} "
-        f"M={record['token_count']} comm={context['moe_comm_type']} outer={context['outer_reduction']}"
+        f"M={record['token_count']} comm={context['moe_comm_type']} "
+        f"default_outer={context['outer_reduction']} "
+        f"production_outer={record.get('production_outer_reduction', 'unknown')}"
     )
     print("  comparison                                      cosine       rel_l2    norm_ratio")
     for name in METRIC_NAMES:

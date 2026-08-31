@@ -126,7 +126,7 @@ def test_select_moe_comm_method_returns_none_for_non_moe(monkeypatch):
 
 
 def test_select_moe_comm_method_uses_catccos_when_enabled(monkeypatch):
-    monkeypatch.setattr(afc.envs_ascend, "VLLM_ASCEND_ENABLE_CATCCOS_MOE", True)
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_CATCCOS_MOE", "1")
     monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
     validate = MagicMock()
     monkeypatch.setattr(afc, "validate_catccos_selection", validate)

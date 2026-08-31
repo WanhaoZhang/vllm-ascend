@@ -99,17 +99,41 @@ def test_runtime_propagates_init_failure(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(catccos_module.torch, "ops", ops)
 
-    runtime = CatCCOSRuntime(_make_moe_config())
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        CatCCOSRuntime(_make_moe_config())
+
     ep_group.barrier.assert_called_once_with()
 
-    with pytest.raises(RuntimeError, match="initialization failed"):
-        runtime.dispatch(
-            torch.randn(64, 256, dtype=torch.bfloat16),
-            torch.zeros(64, 8, dtype=torch.int32),
-            torch.rand(64, 8, dtype=torch.float32),
-            torch.randn(1, 256, 512, dtype=torch.bfloat16),
-            torch.randn(1, 256, 256, dtype=torch.bfloat16),
-        )
+
+def test_runtime_initializes_before_first_dispatch(monkeypatch, tmp_path):
+    library = tmp_path / "libcatccos_torch.so"
+    library.write_bytes(b"catccos")
+    monkeypatch.setenv("VLLM_ASCEND_CATCCOS_LIBRARY_PATH", str(library))
+    monkeypatch.setenv("VLLM_ASCEND_CATCCOS_STORE_ADDR", "tcp://127.0.0.1:29411")
+    monkeypatch.setattr(catccos_module, "get_ascend_device_type", lambda: AscendDeviceType.A2)
+    ep_group = SimpleNamespace(rank_in_group=3, world_size=8, barrier=MagicMock())
+    monkeypatch.setattr(catccos_module, "get_ep_group", lambda: ep_group)
+    dispatch = MagicMock(return_value=torch.ones(64, 256, dtype=torch.bfloat16))
+    init = MagicMock(return_value=0)
+    ops = SimpleNamespace(
+        load_library=MagicMock(),
+        catccos=SimpleNamespace(dispatch_ffn_combine=dispatch, init=init),
+    )
+    monkeypatch.setattr(catccos_module.torch, "ops", ops)
+
+    runtime = CatCCOSRuntime(_make_moe_config())
+
+    init.assert_called_once_with(3, 8, 1 << 30, "tcp://127.0.0.1:29411")
+    ep_group.barrier.assert_called_once_with()
+    runtime.dispatch(
+        torch.randn(64, 256, dtype=torch.bfloat16),
+        torch.zeros(64, 8, dtype=torch.int64),
+        torch.rand(64, 8, dtype=torch.bfloat16),
+        torch.randn(1, 256, 512, dtype=torch.bfloat16),
+        torch.randn(1, 256, 256, dtype=torch.bfloat16),
+    )
+    assert dispatch.call_args.args[1].dtype == torch.int32
+    assert dispatch.call_args.args[2].dtype == torch.float32
 
 
 @pytest.mark.parametrize(
@@ -160,6 +184,26 @@ def test_selection_rejects_four_rank_ep_for_128_experts(monkeypatch):
     )
 
     with pytest.raises(ValueError, match="at most 16"):
+        validate_catccos_selection(config, False)
+
+
+def test_selection_rejects_model_quantization(monkeypatch):
+    monkeypatch.setattr(catccos_module, "get_ascend_device_type", lambda: AscendDeviceType.A2)
+    monkeypatch.setattr(catccos_module, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            enable_expert_parallel=True,
+            pipeline_parallel_size=1,
+        ),
+        model_config=SimpleNamespace(
+            get_num_experts=lambda: 128,
+            hf_text_config=SimpleNamespace(num_experts_per_tok=8),
+            quantization="ascend",
+        ),
+        lora_config=None,
+    )
+
+    with pytest.raises(ValueError, match="unquantized BF16"):
         validate_catccos_selection(config, False)
 
 
@@ -358,6 +402,18 @@ def test_comm_impl_dispatches_padded_inputs_and_slices_output(monkeypatch):
     assert dispatch_args[0].shape == (128, 256)
     assert dispatch_args[1].shape == (128, 8)
     assert stream.record_event.call_count == 2
+
+
+def test_comm_impl_propagates_dispatch_failure(monkeypatch):
+    comm = CatCCOSCommImpl.__new__(CatCCOSCommImpl)
+    comm.moe_config = _make_moe_config()
+    comm.runtime = MagicMock()
+    comm.runtime.dispatch.side_effect = RuntimeError("507015")
+    stream = MagicMock()
+    monkeypatch.setattr(torch.npu, "current_stream", lambda: stream)
+
+    with pytest.raises(RuntimeError, match="507015"):
+        comm.fused_experts(_make_fused_input(m=64))
 
 
 def test_setup_reuses_single_catccos_registry_backend(monkeypatch):

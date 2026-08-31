@@ -136,8 +136,10 @@ def validate_catccos_selection(vllm_config, is_draft_model: bool) -> None:
         "moe_quantize",
         getattr(hf_config, "quantize", None),
     )
-    if quant_type is not None:
-        raise ValueError(f"CatCCOS requires unquantized BF16 MoE, got {quant_type}")
+    model_quantization = getattr(vllm_config.model_config, "quantization", None)
+    if quant_type is not None or model_quantization is not None:
+        quantization = model_quantization if model_quantization is not None else quant_type
+        raise ValueError(f"CatCCOS requires unquantized BF16 MoE, got {quantization}")
     if getattr(vllm_config, "lora_config", None) is not None:
         raise ValueError("CatCCOS does not support LoRA")
     if getattr(parallel_config, "enable_eplb", False):
@@ -277,7 +279,21 @@ class CatCCOSRuntime:
         except AttributeError as error:
             raise RuntimeError("CatCCOS extension does not register dispatch_ffn_combine") from error
         ep_group.barrier()
-        self._initialized = False
+        status = torch.ops.catccos.init(
+            self.rank,
+            self.world_size,
+            self.config.local_mem_size,
+            self.config.store_addr,
+        )
+        if status != 0:
+            raise RuntimeError(f"CatCCOS initialization failed on EP rank {self.rank}/{self.world_size}: {status}")
+        logger.info(
+            "Initialized CatCCOS MoE backend: rank=%d/%d, library=%s, sha256=%s",
+            self.rank,
+            self.world_size,
+            self.config.library_path,
+            self._library_sha256(),
+        )
 
     def _library_sha256(self) -> str:
         digest = hashlib.sha256()
@@ -305,24 +321,6 @@ class CatCCOSRuntime:
         w1: torch.Tensor,
         w2: torch.Tensor,
     ) -> torch.Tensor:
-        if not self._initialized:
-            status = torch.ops.catccos.init(
-                self.rank,
-                self.world_size,
-                self.config.local_mem_size,
-                self.config.store_addr,
-            )
-            if status != 0:
-                raise RuntimeError(f"CatCCOS initialization failed on EP rank {self.rank}/{self.world_size}: {status}")
-            self._initialized = True
-            torch.npu.synchronize()
-            logger.info(
-                "Initialized CatCCOS MoE backend (lazy): rank=%d/%d, library=%s, sha256=%s",
-                self.rank,
-                self.world_size,
-                self.config.library_path,
-                self._library_sha256(),
-            )
         return torch.ops.catccos.dispatch_ffn_combine(
             hidden_states.contiguous(),
             topk_ids.to(torch.int32).contiguous(),

@@ -444,6 +444,8 @@ class TestAscendUnquantizedFusedMoEMethod:
         method.dynamic_eplb = False
         method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
         layer = self._build_layer()
+        layer.w13_weight = nn.Parameter(layer.w13_weight.to(torch.bfloat16))
+        layer.w2_weight = nn.Parameter(layer.w2_weight.to(torch.bfloat16))
         original_w13 = layer.w13_weight.detach().clone()
         original_w2 = layer.w2_weight.detach().clone()
         format_cast = MagicMock(side_effect=lambda weight, _: weight)

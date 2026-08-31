@@ -272,18 +272,6 @@ class CatCCOSCommImpl(MoECommMethod):
         self,
         fused_experts_input: MoEFusedExpertsInput,
     ) -> FusedExpertsResult:
-        try:
-            return self._catccos_fused_experts(fused_experts_input)
-        except RuntimeError as e:
-            if "507015" in str(e):
-                logger.warning("CatCCOS dispatch failed (507015), falling back to MC2")
-                return super().fused_experts(fused_experts_input)
-            raise
-
-    def _catccos_fused_experts(
-        self,
-        fused_experts_input: MoEFusedExpertsInput,
-    ) -> FusedExpertsResult:
         w1, w2 = validate_catccos_fused_input(
             fused_experts_input,
             self.moe_config,

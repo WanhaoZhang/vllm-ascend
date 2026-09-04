@@ -100,6 +100,16 @@ env_variables: dict[str, Callable[[], Any]] = {
     # `dispatch_gmm_combine_decode` can be used only for **decode node** moe layer
     # with W8A8. And MTP layer must be W8A8.
     "VLLM_ASCEND_ENABLE_FUSED_MC2": lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")),
+    # Whether to use CatCCOS for A5 fused dispatch + FFN + combine.
+    "VLLM_ASCEND_CATCCOS": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS", "0"))),
+    "VLLM_ASCEND_CATCCOS_LIBRARY_PATH": lambda: os.getenv(
+        "VLLM_ASCEND_CATCCOS_LIBRARY_PATH",
+        "/workspace/catccos/build_torch_a5/lib/libcatccos_torch.so",
+    ),
+    "VLLM_ASCEND_CATCCOS_IPPORT": lambda: os.getenv("VLLM_ASCEND_CATCCOS_IPPORT", "tcp://127.0.0.1:27020"),
+    "VLLM_ASCEND_CATCCOS_MEM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MEM", str(1024 * 1024 * 1024))),
+    "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "0"))),
+    "VLLM_ASCEND_CATCCOS_MINM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MINM", "1")),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

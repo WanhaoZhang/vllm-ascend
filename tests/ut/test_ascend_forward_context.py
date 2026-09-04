@@ -238,6 +238,36 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (1, MoECommType.MC2),
+        (63, MoECommType.MC2),
+        (64, MoECommType.FUSED_MC2),
+        (177, MoECommType.FUSED_MC2),
+    ],
+)
+def test_select_moe_comm_method_a5_catccos(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=512,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            fused_mc2_backend="catccos",
+            catccos_min_tokens=64,
+        ),
+    )
+    vllm_config = _make_vllm_config(world_size=4, top_k_experts=8)
+
+    assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     _patch_select_moe_comm_method_deps(
         monkeypatch,

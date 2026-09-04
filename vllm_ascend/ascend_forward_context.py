@@ -31,6 +31,11 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+def _catccos_backend_enabled() -> bool:
+    config = get_ascend_config()
+    return config.enable_fused_mc2 == 1 and getattr(config, "fused_mc2_backend", "auto") == "catccos"
+
+
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
@@ -212,8 +217,10 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    # NOTE: To save memory, we cap the max number of tokens to 512.
-    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, 512)
+    max_tokens_per_rank = (
+        getattr(get_ascend_config(), "catccos_max_tokens_per_rank", 512) if _catccos_backend_enabled() else 512
+    )
+    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, max_tokens_per_rank)
     _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
 
 
@@ -293,6 +300,16 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    if _catccos_backend_enabled():
+        min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
+        if min_tokens <= num_tokens <= mc2_tokens_capacity and world_size > 1:
+            return MoECommType.FUSED_MC2
+        if num_tokens < min_tokens:
+            logger.info_once(
+                "CatCCOS is disabled below M=%d; using native MoE for M=%d",
+                min_tokens,
+                num_tokens,
+            )
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:

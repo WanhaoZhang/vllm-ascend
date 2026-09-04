@@ -9,6 +9,7 @@ from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.ops.fused_moe import catccos as catccos_module
 from vllm_ascend.ops.fused_moe import moe_comm_method as moe_comm_module
 from vllm_ascend.ops.fused_moe.catccos import (
+    CATCCOS_SHMEM_BUFFER_BYTES,
     CATCCOS_TOKEN_ALIGNMENT,
     CatCCOSRuntime,
     CatCCOSRuntimeConfig,
@@ -80,6 +81,20 @@ def test_runtime_config_defaults_and_required_values(monkeypatch, tmp_path):
     assert config.library_path == str(library)
     assert config.store_addr == "tcp://127.0.0.1:29411"
     assert config.local_mem_size == 1 << 30
+
+
+def test_runtime_config_rejects_insufficient_symmetric_memory(monkeypatch, tmp_path):
+    library = tmp_path / "libcatccos_torch.so"
+    library.touch()
+    monkeypatch.setenv("VLLM_ASCEND_CATCCOS_LIBRARY_PATH", str(library))
+    monkeypatch.setenv("VLLM_ASCEND_CATCCOS_STORE_ADDR", "tcp://127.0.0.1:29411")
+    monkeypatch.setenv(
+        "VLLM_ASCEND_CATCCOS_LOCAL_MEM_SIZE",
+        str(CATCCOS_SHMEM_BUFFER_BYTES - 1),
+    )
+
+    with pytest.raises(ValueError, match=str(CATCCOS_SHMEM_BUFFER_BYTES)):
+        CatCCOSRuntimeConfig.from_env()
 
 
 def test_runtime_propagates_init_failure(monkeypatch, tmp_path):

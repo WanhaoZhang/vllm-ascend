@@ -25,6 +25,7 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, AscendDeviceType, get_ascen
 CATCCOS_TOKEN_ALIGNMENT = 64
 CATCCOS_MAX_LOCAL_EXPERTS = 16
 CATCCOS_SUPPORTED_TOP_K = 8
+CATCCOS_SHMEM_BUFFER_BYTES = 1004 * 1024 * 1024
 
 
 def catccos_moe_enabled() -> bool:
@@ -51,8 +52,8 @@ class CatCCOSRuntimeConfig:
             raise FileNotFoundError(f"CatCCOS extension does not exist: {library}")
         if not store_addr.startswith("tcp://"):
             raise ValueError("VLLM_ASCEND_CATCCOS_STORE_ADDR must be a tcp:// rendezvous address")
-        if local_mem_size <= 0 or local_mem_size > 2**31 - 1:
-            raise ValueError("VLLM_ASCEND_CATCCOS_LOCAL_MEM_SIZE must be in [1, 2^31 - 1]")
+        if not CATCCOS_SHMEM_BUFFER_BYTES <= local_mem_size <= 2**31 - 1:
+            raise ValueError(f"VLLM_ASCEND_CATCCOS_LOCAL_MEM_SIZE must be in [{CATCCOS_SHMEM_BUFFER_BYTES}, 2^31 - 1]")
         return cls(str(library), store_addr, local_mem_size)
 
 

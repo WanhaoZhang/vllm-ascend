@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import threading
 from dataclasses import dataclass
 from functools import lru_cache
@@ -15,12 +17,24 @@ from typing import Any
 import torch
 from vllm.logger import logger
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _INITIALIZED_GROUP: tuple[int, int] | None = None
 _INITIALIZE_LOCK = threading.Lock()
+_CATCCOS_DUMP_DIR = ascend_envs.VLLM_ASCEND_CATCCOS_DUMP_DIR
+_CATCCOS_DUMP_TRIGGER = ascend_envs.VLLM_ASCEND_CATCCOS_DUMP_TRIGGER
+_CATCCOS_DUMP_FILES = (
+    ("x", "in_routing_matrix_a"),
+    ("expert_idx", "in_routing_expert_idx"),
+    ("gate_weight", "in_gather_gate_weight"),
+    ("w1", "in_gmm_matrix_b"),
+    ("w1_scale", "in_gmm_matrix_b_scale"),
+    ("w2", "in_gmm_matrix_b2"),
+    ("w2_scale", "in_gmm_matrix_b2_scale"),
+)
 
 
 @dataclass(frozen=True)
@@ -196,6 +210,102 @@ def prepare_catccos_weights(layer: torch.nn.Module) -> None:
     )
 
 
+def _write_tensor_as_raw_bytes(tensor: torch.Tensor, path: Path) -> None:
+    raw_bytes = tensor.detach().contiguous().view(torch.uint8).cpu()
+    temporary_path = path.with_suffix(f"{path.suffix}.tmp")
+    temporary_path.write_bytes(raw_bytes.numpy().tobytes())
+    temporary_path.replace(path)
+
+
+def _dump_catccos_inputs(
+    x: torch.Tensor,
+    expert_idx: torch.Tensor,
+    gate_weight: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> None:
+    if _CATCCOS_DUMP_DIR is None or _CATCCOS_DUMP_TRIGGER is None:
+        return
+    if not Path(_CATCCOS_DUMP_TRIGGER).is_file():
+        return
+    if _INITIALIZED_GROUP is None:
+        logger.error("CatCCOS input capture requested before CatCCOS initialization")
+        return
+
+    ep_rank, ep_world_size = _INITIALIZED_GROUP
+    dump_dir = Path(_CATCCOS_DUMP_DIR)
+    manifest_path = dump_dir / f"manifest_rank_{ep_rank}.json"
+    lock_path = dump_dir / f".capture_rank_{ep_rank}.lock"
+    lock_acquired = False
+
+    try:
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        if manifest_path.is_file():
+            return
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            return
+        os.close(lock_fd)
+        lock_acquired = True
+
+        tensors = {
+            "x": x,
+            "expert_idx": expert_idx,
+            "gate_weight": gate_weight,
+            "w1": w1,
+            "w1_scale": w1_scale,
+            "w2": w2,
+            "w2_scale": w2_scale,
+        }
+        files = {}
+        tensor_metadata = {}
+        for argument_name, file_stem in _CATCCOS_DUMP_FILES:
+            tensor = tensors[argument_name]
+            file_name = f"{file_stem}_{ep_rank}.bin"
+            _write_tensor_as_raw_bytes(tensor, dump_dir / file_name)
+            files[argument_name] = file_name
+            tensor_metadata[argument_name] = {
+                "shape": list(tensor.shape),
+                "dtype": str(tensor.dtype),
+                "stride": list(tensor.stride()),
+                "is_contiguous": tensor.is_contiguous(),
+                "num_bytes": tensor.numel() * tensor.element_size(),
+            }
+
+        global_rank = ep_rank
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            global_rank = torch.distributed.get_rank()
+        manifest = {
+            "format_version": 1,
+            "global_rank": global_rank,
+            "ep_rank": ep_rank,
+            "ep_world_size": ep_world_size,
+            "files": files,
+            "tensors": tensor_metadata,
+        }
+        temporary_manifest = manifest_path.with_suffix(".json.tmp")
+        temporary_manifest.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        temporary_manifest.replace(manifest_path)
+        logger.warning(
+            "Captured CatCCOS inputs for global rank %d, EP rank %d/%d in %s",
+            global_rank,
+            ep_rank,
+            ep_world_size,
+            dump_dir,
+        )
+    except Exception:
+        logger.exception("Failed to capture CatCCOS inputs for EP rank %d", ep_rank)
+    finally:
+        if lock_acquired:
+            lock_path.unlink(missing_ok=True)
+
+
 def apply_catccos(
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -206,11 +316,16 @@ def apply_catccos(
     w2_scale: torch.Tensor,
 ) -> torch.Tensor:
     initialize_catccos()
+    x = hidden_states.contiguous()
+    expert_idx = topk_ids.to(torch.int32).contiguous()
+    gate_weight = topk_weights.to(torch.float32).contiguous()
     torch.npu.synchronize()
+    if _CATCCOS_DUMP_DIR is not None:
+        _dump_catccos_inputs(x, expert_idx, gate_weight, w1, w1_scale, w2, w2_scale)
     output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
-        hidden_states.contiguous(),
-        topk_ids.to(torch.int32).contiguous(),
-        topk_weights.to(torch.float32).contiguous(),
+        x,
+        expert_idx,
+        gate_weight,
         w1,
         w1_scale,
         w2,

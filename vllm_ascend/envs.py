@@ -110,6 +110,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_CATCCOS_MEM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MEM", str(1024 * 1024 * 1024))),
     "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "0"))),
     "VLLM_ASCEND_CATCCOS_MINM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MINM", "1")),
+    # Optional CatCCOS input capture for standalone operator replay. Set both
+    # variables before startup, then create the trigger file after vLLM warmup.
+    # The default None disables capture. The paths are not sensitive.
+    "VLLM_ASCEND_CATCCOS_DUMP_DIR": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DUMP_DIR", None),
+    "VLLM_ASCEND_CATCCOS_DUMP_TRIGGER": lambda: os.getenv("VLLM_ASCEND_CATCCOS_DUMP_TRIGGER", None),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

@@ -49,6 +49,7 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
     TokenDispatcherWithAllGather,
     TokenDispatcherWithMC2,
 )
+from vllm_ascend.profiler.moe_profile import moe_profile_range
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
@@ -148,30 +149,37 @@ class MoECommMethod(ABC):
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         assert moe_comm_method is not None, "Missing communication context"
 
-        before_dispatch_evt = torch.npu.current_stream().record_event()
-        routed_topk_ids = fused_experts_input.topk_ids
-        if fused_experts_input.routing.log2phy is not None:
-            routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
+        profile_backend = f"native_{moe_comm_method.name.lower()}"
+        hidden_states = fused_experts_input.hidden_states
+        topk_ids = fused_experts_input.topk_ids
+        with moe_profile_range(profile_backend, "total", hidden_states, topk_ids):
+            before_dispatch_evt = torch.npu.current_stream().record_event()
+            routed_topk_ids = topk_ids
+            if fused_experts_input.routing.log2phy is not None:
+                routed_topk_ids = fused_experts_input.routing.log2phy[routed_topk_ids]
 
-        token_dispatch_input = build_token_dispatch_input(
-            fused_experts_input=fused_experts_input,
-            topk_ids=routed_topk_ids,
-        )
-        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+            token_dispatch_input = build_token_dispatch_input(
+                fused_experts_input=fused_experts_input,
+                topk_ids=routed_topk_ids,
+            )
+            with moe_profile_range(profile_backend, "dispatch", hidden_states, topk_ids):
+                token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
-        mlp_compute_input = build_mlp_compute_input(
-            fused_experts_input=fused_experts_input,
-            token_dispatch_output=token_dispatch_output,
-            use_fusion_ops=self.use_fusion_ops,
-        )
+            mlp_compute_input = build_mlp_compute_input(
+                fused_experts_input=fused_experts_input,
+                token_dispatch_output=token_dispatch_output,
+                use_fusion_ops=self.use_fusion_ops,
+            )
 
-        mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
+            with moe_profile_range(profile_backend, "mlp", hidden_states, topk_ids):
+                mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
-        before_combine_evt = torch.npu.current_stream().record_event()
-        routed_out = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output,
-            combine_metadata=token_dispatch_output.combine_metadata,
-        )
+            before_combine_evt = torch.npu.current_stream().record_event()
+            with moe_profile_range(profile_backend, "combine", hidden_states, topk_ids):
+                routed_out = self.token_dispatcher.token_combine(
+                    hidden_states=mlp_output,
+                    combine_metadata=token_dispatch_output.combine_metadata,
+                )
 
         return FusedExpertsResult(
             routed_out=routed_out,

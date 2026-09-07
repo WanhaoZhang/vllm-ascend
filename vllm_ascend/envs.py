@@ -110,6 +110,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_CATCCOS_MEM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MEM", str(1024 * 1024 * 1024))),
     "VLLM_ASCEND_CATCCOS_SYNC_DEVICE": lambda: bool(int(os.getenv("VLLM_ASCEND_CATCCOS_SYNC_DEVICE", "0"))),
     "VLLM_ASCEND_CATCCOS_MINM": lambda: int(os.getenv("VLLM_ASCEND_CATCCOS_MINM", "1")),
+    # Add shape-qualified CatCCOS and native MC2 ranges to service profiler
+    # traces. Disabled by default to avoid overhead outside profiling runs.
+    "VLLM_ASCEND_MOE_PROFILE_RANGES": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_PROFILE_RANGES", "0"))),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

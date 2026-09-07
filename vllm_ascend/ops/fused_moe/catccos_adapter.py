@@ -16,6 +16,7 @@ import torch
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.profiler.moe_profile import moe_profile_range
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
@@ -205,17 +206,25 @@ def apply_catccos(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> torch.Tensor:
-    initialize_catccos()
-    torch.npu.synchronize()
-    output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
-        hidden_states.contiguous(),
-        topk_ids.to(torch.int32).contiguous(),
-        topk_weights.to(torch.float32).contiguous(),
-        w1,
-        w1_scale,
-        w2,
-        w2_scale,
-    )
-    if get_ascend_config().catccos_sync_after_launch:
-        torch.npu.synchronize()
+    with moe_profile_range("catccos", "total", hidden_states, topk_ids):
+        initialize_catccos()
+        with moe_profile_range("catccos", "pre_sync", hidden_states, topk_ids):
+            torch.npu.synchronize()
+        with moe_profile_range("catccos", "input_prepare", hidden_states, topk_ids):
+            x = hidden_states.contiguous()
+            expert_idx = topk_ids.to(torch.int32).contiguous()
+            gate_weight = topk_weights.to(torch.float32).contiguous()
+        with moe_profile_range("catccos", "kernel", hidden_states, topk_ids):
+            output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
+                x,
+                expert_idx,
+                gate_weight,
+                w1,
+                w1_scale,
+                w2,
+                w2_scale,
+            )
+        if get_ascend_config().catccos_sync_after_launch:
+            with moe_profile_range("catccos", "post_sync", hidden_states, topk_ids):
+                torch.npu.synchronize()
     return output

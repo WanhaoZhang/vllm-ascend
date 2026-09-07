@@ -6,5 +6,6 @@
 performance_benchmark
 optimization_and_tuning
 service_profiling_guide
+catccos_service_profiling
 msprobe_guide
 ::::

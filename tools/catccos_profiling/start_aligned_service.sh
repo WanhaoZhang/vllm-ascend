@@ -14,6 +14,7 @@ profile_dir=${profile_root}/${profile_tag}
 profile_iters=${PROFILE_ITERS:-20}
 sync_boundaries=${SYNC_BOUNDARIES:-1}
 model=${MODEL:-/home/weights/Qwen3-30B-A3B-Instruct-2507}
+served_model_name=${SERVED_MODEL_NAME:-qwen3-catccos}
 port=${PORT:-28001}
 catccos_root=${CATCCOS_ROOT:-/home/z00956592/catccos}
 catccos_library=${CATCCOS_LIBRARY:-${catccos_root}/build_torch_a5/lib/libcatccos_torch.so}
@@ -65,7 +66,7 @@ echo "sync_boundaries=${sync_boundaries}"
 echo "additional_config=${additional_config}"
 
 exec "${vllm_bin}" serve "${model}" \
-    --served-model-name qwen3-megamoe-profile \
+    --served-model-name "${served_model_name}" \
     --trust-remote-code \
     --dtype bfloat16 \
     --tensor-parallel-size 4 \

@@ -26,8 +26,8 @@ vllm_ascend.moe.catccos.host_moe_body[M=2,H=2048,topK=8]
     ├── vllm_ascend.moe.catccos.kernel_enqueue[...]
     └── vllm_ascend.moe.catccos.post_sync_host_wait[...]  # sync=true 时存在
 
-vllm_ascend.moe.native_mc2.host_moe_body[M=2,H=2048,topK=8]
-└── vllm_ascend.moe.native_mc2.pipeline_host_scope[...]
+vllm_ascend.moe.native_<实际通信路径>.host_moe_body[M=2,H=2048,topK=8]
+└── vllm_ascend.moe.native_<实际通信路径>.pipeline_host_scope[...]
     ├── vllm_ascend.moe.native_mc2.dispatch_enqueue[...]
     ├── vllm_ascend.moe.native_mc2.mlp_enqueue[...]
     └── vllm_ascend.moe.native_mc2.combine_enqueue[...]
@@ -49,7 +49,14 @@ launch，因此两个 `host_moe_body` 的 duration 不能直接相减。
 | 轮次 | `moe_comm_type` | `fused_experts` 内部实现 |
 |---|---|---|
 | CatCCOS | `FUSED_MC2` | `apply_catccos` → `ascend950_dispatch_ffn_combine` |
-| native baseline | `MC2` | `token_dispatch` → `_apply_mlp` → `token_combine` |
+| native default decode | 通常为 `MC2` | `token_dispatch` → `_apply_mlp` → `token_combine` |
+| native default prefill | 由 token capacity 决定 | 可能为 `ALLGATHER` 或 `ALLTOALL` |
+
+原始 native 脚本不传 additional config，而 CatCCOS 脚本设置了
+`enable_prefill_mc2=true`。该配置参与计算 MC2 token capacity，因此原始两轮是
+“CatCCOS 整套服务配置 vs native 默认服务配置”的端到端对照。它们的 decode
+通常会形成 CatCCOS vs native MC2 对照；prefill 不保证走同一通信路径，必须以
+trace 中的 `native_mc2/native_allgather/native_alltoall` 名称为准。
 
 两边共同的 `fused_experts` range 对应同一个 routed-expert 替换接口，输入均为
 router 选出的 `hidden_states/topk_ids/topk_weights` 和本层专家权重，输出均为
@@ -62,8 +69,9 @@ router 选出的 `hidden_states/topk_ids/topk_weights` 和本层专家权重，�
 - 两边都不包含上游的 MC2 prepare/padding、router top-k，也不包含下游
   finalize；`build_fused_experts_input` 也在共同 range 之外。
 
-因此要比较“服务采用这套后端付出的完整 routed-expert 成本”，看对齐模式的
-`synchronized_moe_body`；要比较“CatCCOS 融合 Device kernel 本身”，则在
+因此要在相同通信路径下比较“服务采用这套后端付出的完整 routed-expert
+成本”，看 CatCCOS 与 `native_mc2` 的 `synchronized_moe_body`；要比较
+“CatCCOS 融合 Device kernel 本身”，则在
 NPU timeline 中将它与 native dispatch、MLP、combine 的 Device critical-path
 span 对齐。native 各 Device kernel 可能重叠，不能直接把 CSV 中每个 kernel 的
 duration 无条件相加。
@@ -158,7 +166,29 @@ npu_moe_distribute_dispatch[_v2]
 → npu_moe_distribute_combine[_v2]
 ```
 
-它不是 CANN fused `_C_ascend.dispatch_ffn_combine`。
+decode 通常走以上 MC2 路径；prefill 可能因 MC2 capacity 回退到 ALLGATHER 或
+ALLTOALL。它不是 CANN fused `_C_ascend.dispatch_ffn_combine`。
+
+若本轮目的是做 CatCCOS/native MC2 的严格同路径 profiling，native 启动脚本
+应显式传入：
+
+```bash
+NATIVE_ADDCONF='{
+  "enable_fused_mc2":0,
+  "fused_mc2_backend":"auto",
+  "enable_prefill_mc2":true
+}'
+```
+
+并在 `vllm serve` 中加入：
+
+```bash
+--additional-config "$NATIVE_ADDCONF"
+```
+
+这会关闭 CANN fused MC2，同时让 native 使用与 CatCCOS 相同的 prefill MC2
+capacity。若 trace 中同一个 `M` 仍显示 `native_allgather` 或
+`native_alltoall`，该样本不能与 CatCCOS 的 `synchronized_moe_body` 直接配对。
 
 服务启动后先正常预热。只有调用 `/start_profile` 后才开始采集。不要在
 profiling 同一轮开启输入 dump，否则 device-to-host 拷贝会污染时间线。
@@ -350,6 +380,8 @@ vllm_ascend.moe.native_mc2.pipeline_host_scope
 vllm_ascend.moe.native_mc2.dispatch_enqueue
 vllm_ascend.moe.native_mc2.mlp_enqueue
 vllm_ascend.moe.native_mc2.combine_enqueue
+vllm_ascend.moe.native_allgather.host_moe_body
+vllm_ascend.moe.native_alltoall.host_moe_body
 ```
 
 完整名称会带真实输入 shape：
@@ -365,7 +397,8 @@ vllm_ascend.moe.native_mc2.dispatch_enqueue[M=2,H=2048,topK=8]
 
 1. 自然服务轮比较整个 worker iteration、Device critical-path span 和 NPU 空洞；
    不直接比较两个 `host_moe_body` duration。
-2. 对齐边界轮比较 CatCCOS 与 native MC2 的 `synchronized_moe_body`。
+2. 对齐边界轮只配对相同 `M` 的 CatCCOS 与 `native_mc2`
+   `synchronized_moe_body`；出现 `native_allgather/native_alltoall` 时不配对。
 3. CatCCOS `pre_sync_host_wait`、`post_sync_host_wait` 的 Host 等待时间。
 4. CatCCOS 融合 kernel 与 native dispatch、MLP、combine 所关联的 Device
    Kernel 总时间。

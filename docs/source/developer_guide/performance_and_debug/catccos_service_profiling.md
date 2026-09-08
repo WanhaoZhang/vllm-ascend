@@ -14,6 +14,17 @@
 codex/megamoe-a5-vllm-v023-service-profiling
 ```
 
+配套的 CatCCOS Host 细分打点位于 CatCCOS 分支：
+
+```text
+codex/megamoe-vllm-service-profiling
+```
+
+该 CatCCOS 分支基于已解决连续 `M=1` launch 卡死的 `722a201`。每次 launch
+仍然完整执行 metadata 清零、workspace full-clean、symmetric-A full-clean 和
+rank barrier；profiling 只在这些操作外增加 Host user-scope，不改变同步、清零、
+buffer 或 kernel launch 语义。
+
 该分支不包含后续 CatCCOS 输入 dump 提交。它复用 vLLM 自带的
 `--profiler-config`、`/start_profile` 和 `/stop_profile`，仅增加以下
 shape-qualified profiler ranges：
@@ -31,7 +42,18 @@ vllm_ascend.moe.native_<实际通信路径>.host_moe_body[M=2,H=2048,topK=8]
     ├── vllm_ascend.moe.native_mc2.dispatch_enqueue[...]
     ├── vllm_ascend.moe.native_mc2.mlp_enqueue[...]
     └── vllm_ascend.moe.native_mc2.combine_enqueue[...]
+
+catccos.a5.binding.binding_host_scope[M=2,H=2048,N=1536,topK=8]
+├── catccos.a5.binding.metadata_memset_host[...]
+├── catccos.a5.binding.rank_barrier_host[...]
+├── catccos.a5.binding.workspace_full_clean_host[...]
+├── catccos.a5.binding.symmetric_a_full_clean_host[...]
+├── catccos.a5.binding.dynamic_tiling_host[...]
+└── catccos.a5.binding.kernel_launch_host[...]
 ```
+
+`kernel_launch_host` 只统计异步 launch 的 Host 调用；融合 kernel 的 Device
+duration 仍然从 `kernel_details.csv` 或 `trace_view.json` 的 NPU 行读取。
 
 环境变量不开时，这些 profiler ranges 不会建立：
 
@@ -47,7 +69,7 @@ launch，因此两个 `host_moe_body` 的 duration 不能直接相减。
 本次脚本中的真实路径是：
 
 | 轮次 | `moe_comm_type` | `fused_experts` 内部实现 |
-|---|---|---|
+| --- | --- | --- |
 | CatCCOS | `FUSED_MC2` | `apply_catccos` → `ascend950_dispatch_ffn_combine` |
 | native default decode | 通常为 `MC2` | `token_dispatch` → `_apply_mlp` → `token_combine` |
 | native default prefill | 由 token capacity 决定 | 可能为 `ALLGATHER` 或 `ALLTOALL` |
@@ -110,6 +132,23 @@ git switch -C codex/megamoe-a5-vllm-v023-service-profiling FETCH_HEAD
 git rev-parse HEAD
 ```
 
+同时拉取并重新编译带细分打点的 CatCCOS：
+
+```bash
+cd /home/z00956592/catccos
+
+git fetch git@github.com:WanhaoZhang/CATCCOS.git \
+  codex/megamoe-vllm-service-profiling
+git switch -C codex/megamoe-vllm-service-profiling FETCH_HEAD
+
+bash examples/ascend950_dispatch_ffn_combine/scripts/build_python.sh
+git rev-parse HEAD
+sha256sum build_torch_a5/lib/libcatccos_torch.so
+```
+
+构建后必须先执行已有的连续 launch/正确性测试。full-clean 是 repeat-launch
+正确性保护，不能为了 profile 直接删除。
+
 如果使用 editable install 或者启动脚本已经设置：
 
 ```bash
@@ -119,6 +158,39 @@ export PYTHONPATH=/home/z00956592/vllm-ascend-catccos:${PYTHONPATH:-}
 切换分支后重启服务即可，不需要重新编译 CatCCOS 动态库。
 
 ## 3. 修改 CatCCOS 和 native 启动脚本
+
+仓库已提供严格对齐启动脚本：
+
+```text
+tools/catccos_profiling/start_aligned_service.sh
+```
+
+它强制两边使用 `OMP_NUM_THREADS=1`、`enable_prefill_mc2=true`、相同 TP/EP、
+batch capacity 和 profiler 配置。默认 `SYNC_BOUNDARIES=1`，用于比较相同完成
+边界。CatCCOS 轮：
+
+```bash
+cd /home/z00956592/vllm-ascend-catccos
+
+PROFILE_TAG=catccos_aligned_m2_r1 \
+PROFILE_ITERS=20 \
+CATCCOS_ROOT=/home/z00956592/catccos \
+bash tools/catccos_profiling/start_aligned_service.sh catccos
+```
+
+停止服务后启动 native 轮：
+
+```bash
+PROFILE_TAG=native_aligned_m2_r1 \
+PROFILE_ITERS=20 \
+bash tools/catccos_profiling/start_aligned_service.sh native
+```
+
+每个 `PROFILE_TAG` 必须唯一；脚本发现目录已存在时会退出，避免覆盖原始数据。
+需要观察自然服务流水时，另起一轮显式设置 `SYNC_BOUNDARIES=0`。正式吞吐、TTFT
+和 TPOT 必须关闭 profiler 测量。
+
+以下手工配置用于理解脚本内容或适配已有启动脚本。
 
 在原来的 `/home/z00956592/start_m1test.sh` 和
 `/home/z00956592/start_m1test_native.sh` 中，在 `vllm serve` 之前加入：
@@ -357,6 +429,23 @@ ASCEND_PROFILER_OUTPUT/step_trace_time.csv
 
 `trace_view.json` 可以使用 MindStudio Insight 打开。
 
+仓库内可以直接执行：
+
+```bash
+python tools/catccos_profiling/analyse_profiles.py \
+  /home/z00956592/profiles/catccos_aligned_m2_r1 \
+  /home/z00956592/profiles/native_aligned_m2_r1
+
+python tools/catccos_profiling/extract_ranges.py \
+  /home/z00956592/profiles/catccos_aligned_m2_r1 \
+  /home/z00956592/profiles/native_aligned_m2_r1 \
+  --output /home/z00956592/profiles/aligned_m2_ranges.csv
+```
+
+`extract_ranges.py` 同时提取 `vllm_ascend.moe.*` 和
+`catccos.a5.binding.*`，完整保留 `M/H/N/topK`，按每个 rank 的
+`operator_details.csv` 输出 count、Host P50、P95 和最大值。
+
 ## 8. trace 中搜索的名称
 
 CatCCOS：
@@ -369,6 +458,13 @@ vllm_ascend.moe.catccos.pre_sync_host_wait
 vllm_ascend.moe.catccos.input_prepare_host
 vllm_ascend.moe.catccos.kernel_enqueue
 vllm_ascend.moe.catccos.post_sync_host_wait
+catccos.a5.binding.binding_host_scope
+catccos.a5.binding.metadata_memset_host
+catccos.a5.binding.rank_barrier_host
+catccos.a5.binding.workspace_full_clean_host
+catccos.a5.binding.symmetric_a_full_clean_host
+catccos.a5.binding.dynamic_tiling_host
+catccos.a5.binding.kernel_launch_host
 ```
 
 native：
@@ -414,3 +510,56 @@ Device 时间，无法自动拆开这些内部阶段。
 profiling 会影响服务速度，因此 Output Token Throughput、TTFT 和 TPOT 的正式
 A/B 数值仍以关闭 profiler 的原始 200 题复测为准。服务内 profiling 用来解释
 性能差距来自 kernel、同步、launch、通信还是 rank 长尾。
+
+## 10. 本轮应执行的收敛顺序
+
+### 10.1 先复用已有 trace
+
+先对已有 `catccos_load_r1` 和 `native_load_r1` 执行第 7 节两个工具。原始 trace
+中的 range 名保留了真实 `M`，不要再使用将 `M` 统一替换成占位符的旧脚本。
+
+对每个 rank 先确认：
+
+1. `M=2` 是否同时存在 CatCCOS 和 `native_mc2` 样本。
+2. native 的 816 个 MC2 range 和 144 个 fallback range 分别对应哪些 `M`。
+3. CatCCOS 融合 kernel 在 `kernel_details.csv` 中的准确名称和 Device duration。
+4. `trace_view.json` 中 native 从第一个 dispatch Device kernel 开始，到最后一个
+   combine Device kernel 结束的 critical-path span。
+
+已有自然服务轮可以显示真实流水，但不能直接相减 CatCCOS/native 的
+`host_moe_body`，因为 CatCCOS 包含同步完成等待，而 native 主要是异步下发。
+
+### 10.2 再跑严格对齐轮
+
+使用第 3 节统一启动脚本，依次抓：
+
+| 场景 | rank-local M | `PROFILE_ITERS` | 目标 |
+| --- | ---: | ---: | --- |
+| 稳态 decode，并发 8 | 2 | 10 或 20 | 固定调用、barrier 和小 M kernel |
+| 552-token prefill | 138 | 1 | 中等 M 的清零与 kernel |
+| 2048-token prefill | 512 | 1 | capacity 边界的大 M 行为 |
+
+每个场景分别运行 CatCCOS 和 native。只配对 backend、M、H、topK、rank 都一致
+的样本，并同时记录 P50、P95 和四个 rank 的最大值。
+
+### 10.3 用新增细分 range 判断下一步
+
+按下面顺序判读：
+
+1. `metadata_memset_host`、两个 `full_clean_host` 明显随 M 增长：继续定位哪些
+   workspace/symmetric buffer 区域会在写前读取，在保持连续 launch 正确性的前提
+   下缩小清零范围。不得直接删除 full-clean。
+2. `rank_barrier_host` 长且四卡差异大：定位 rank 到达时间和 barrier 前的长尾。
+3. `dynamic_tiling_host` 稳定占用明显：缓存相同 shape 的 tiling 结果，再做 A/B。
+4. CatCCOS Device kernel 长于 native critical-path span：使用已 dump 的相同真实
+   输入做 EP4 standalone replay，继续拆 routing、MXFP8、通信、GMM 和 unpermute。
+5. Device kernel 不慢但自然服务仍慢：逐项验证 pre-sync、post-sync 和 Host/Device
+   overlap。每次只改一个同步点，并执行连续 launch 正确性压测。
+
+最终结果至少保留下列字段，避免只看一个总时间：
+
+```text
+M, rank, Cat synchronized body, metadata memset, barrier,
+workspace clean, symmetric clean, tiling, launch Host,
+Cat Device kernel, native Device span
+```

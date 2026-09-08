@@ -19,23 +19,66 @@ codex/megamoe-a5-vllm-v023-service-profiling
 shape-qualified profiler ranges：
 
 ```text
-vllm_ascend.moe.catccos.total[M=2,H=2048,topK=8]
-├── vllm_ascend.moe.catccos.pre_sync[...]
-├── vllm_ascend.moe.catccos.input_prepare[...]
-├── vllm_ascend.moe.catccos.kernel[...]
-└── vllm_ascend.moe.catccos.post_sync[...]  # sync_after_launch=true 时存在
+vllm_ascend.moe.catccos.host_moe_body[M=2,H=2048,topK=8]
+└── vllm_ascend.moe.catccos.adapter_host_scope[...]
+    ├── vllm_ascend.moe.catccos.pre_sync_host_wait[...]
+    ├── vllm_ascend.moe.catccos.input_prepare_host[...]
+    ├── vllm_ascend.moe.catccos.kernel_enqueue[...]
+    └── vllm_ascend.moe.catccos.post_sync_host_wait[...]  # sync=true 时存在
 
-vllm_ascend.moe.native_mc2.total[M=2,H=2048,topK=8]
-├── vllm_ascend.moe.native_mc2.dispatch[...]
-├── vllm_ascend.moe.native_mc2.mlp[...]
-└── vllm_ascend.moe.native_mc2.combine[...]
+vllm_ascend.moe.native_mc2.host_moe_body[M=2,H=2048,topK=8]
+└── vllm_ascend.moe.native_mc2.pipeline_host_scope[...]
+    ├── vllm_ascend.moe.native_mc2.dispatch_enqueue[...]
+    ├── vllm_ascend.moe.native_mc2.mlp_enqueue[...]
+    └── vllm_ascend.moe.native_mc2.combine_enqueue[...]
 ```
 
 环境变量不开时，这些 profiler ranges 不会建立：
 
 ```bash
 export VLLM_ASCEND_MOE_PROFILE_RANGES=1
+export VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES=0
 ```
+
+默认的 `host_moe_body` 从两条路径共同的 `fused_experts` 调用点开始和结束，
+代码边界一致，但它是 Host range。CatCCOS 内有显式同步，而 native 默认是异步
+launch，因此两个 `host_moe_body` 的 duration 不能直接相减。
+
+本次脚本中的真实路径是：
+
+| 轮次 | `moe_comm_type` | `fused_experts` 内部实现 |
+|---|---|---|
+| CatCCOS | `FUSED_MC2` | `apply_catccos` → `ascend950_dispatch_ffn_combine` |
+| native baseline | `MC2` | `token_dispatch` → `_apply_mlp` → `token_combine` |
+
+两边共同的 `fused_experts` range 对应同一个 routed-expert 替换接口，输入均为
+router 选出的 `hidden_states/topk_ids/topk_weights` 和本层专家权重，输出均为
+合并后的 routed expert hidden states。它们在语义上对应，但内部工作不是逐行等价：
+
+- CatCCOS 包含 adapter 校验、初始化、显式 pre-sync、输入 dtype/layout 转换、
+  融合算子 launch，以及配置开启时的 post-sync。
+- native MC2 包含 dispatch 元数据构造与 launch、专家 MLP launch、combine
+  元数据构造与 launch。
+- 两边都不包含上游的 MC2 prepare/padding、router top-k，也不包含下游
+  finalize；`build_fused_experts_input` 也在共同 range 之外。
+
+因此要比较“服务采用这套后端付出的完整 routed-expert 成本”，看对齐模式的
+`synchronized_moe_body`；要比较“CatCCOS 融合 Device kernel 本身”，则在
+NPU timeline 中将它与 native dispatch、MLP、combine 的 Device critical-path
+span 对齐。native 各 Device kernel 可能重叠，不能直接把 CSV 中每个 kernel 的
+duration 无条件相加。
+
+需要直接比较隔离后的 routed-expert 墙钟耗时时，再单独运行一轮：
+
+```bash
+export VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES=1
+```
+
+该模式在进入共同 range 前执行一次 `torch.npu.synchronize()`，清空此前工作；
+在 range 内的 MoE 调用后再次同步，再结束 range。range 名称变为
+`synchronized_moe_body`。两边的开始和结束 Device 状态相同，因此该 range
+才能直接比较。额外同步会改变 native 的正常 overlap，只用于诊断，不能用它
+产生正式服务吞吐、TTFT 或 TPOT 数据。
 
 名称中的 `M` 是 MC2 padding 和 TP 切分之后的真实 rank-local token 数。
 在 TP4 下：
@@ -75,6 +118,7 @@ export PYTHONPATH=/home/z00956592/vllm-ascend-catccos:${PYTHONPATH:-}
 ```bash
 export MSMONITOR_USE_DAEMON=0
 export VLLM_ASCEND_MOE_PROFILE_RANGES=1
+export VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES=0
 
 PROFILE_TAG="${PROFILE_TAG:?set PROFILE_TAG}"
 PROFILE_ITERS="${PROFILE_ITERS:-20}"
@@ -288,40 +332,46 @@ ASCEND_PROFILER_OUTPUT/step_trace_time.csv
 CatCCOS：
 
 ```text
-vllm_ascend.moe.catccos.total
-vllm_ascend.moe.catccos.pre_sync
-vllm_ascend.moe.catccos.input_prepare
-vllm_ascend.moe.catccos.kernel
-vllm_ascend.moe.catccos.post_sync
+vllm_ascend.moe.catccos.host_moe_body
+vllm_ascend.moe.catccos.synchronized_moe_body
+vllm_ascend.moe.catccos.adapter_host_scope
+vllm_ascend.moe.catccos.pre_sync_host_wait
+vllm_ascend.moe.catccos.input_prepare_host
+vllm_ascend.moe.catccos.kernel_enqueue
+vllm_ascend.moe.catccos.post_sync_host_wait
 ```
 
 native：
 
 ```text
-vllm_ascend.moe.native_mc2.total
-vllm_ascend.moe.native_mc2.dispatch
-vllm_ascend.moe.native_mc2.mlp
-vllm_ascend.moe.native_mc2.combine
+vllm_ascend.moe.native_mc2.host_moe_body
+vllm_ascend.moe.native_mc2.synchronized_moe_body
+vllm_ascend.moe.native_mc2.pipeline_host_scope
+vllm_ascend.moe.native_mc2.dispatch_enqueue
+vllm_ascend.moe.native_mc2.mlp_enqueue
+vllm_ascend.moe.native_mc2.combine_enqueue
 ```
 
 完整名称会带真实输入 shape：
 
 ```text
-vllm_ascend.moe.catccos.kernel[M=2,H=2048,topK=8]
-vllm_ascend.moe.native_mc2.dispatch[M=2,H=2048,topK=8]
+vllm_ascend.moe.catccos.kernel_enqueue[M=2,H=2048,topK=8]
+vllm_ascend.moe.native_mc2.dispatch_enqueue[M=2,H=2048,topK=8]
 ```
 
 ## 9. A/B 判读方式
 
 同一 workload、同一 `M` 下比较：
 
-1. CatCCOS `total` 与 native MC2 `total`。
-2. CatCCOS `pre_sync`、`post_sync` 的 Host 等待时间。
-3. CatCCOS 融合 kernel 与 native dispatch、MLP、combine 所关联的 Device
+1. 自然服务轮比较整个 worker iteration、Device critical-path span 和 NPU 空洞；
+   不直接比较两个 `host_moe_body` duration。
+2. 对齐边界轮比较 CatCCOS 与 native MC2 的 `synchronized_moe_body`。
+3. CatCCOS `pre_sync_host_wait`、`post_sync_host_wait` 的 Host 等待时间。
+4. CatCCOS 融合 kernel 与 native dispatch、MLP、combine 所关联的 Device
    Kernel 总时间。
-4. NPU 时间线中的空闲区间和算子 launch 间隔。
-5. 四个 rank 的最大耗时。集合通信路径由最慢 rank 决定，不能只看平均值。
-6. 多个 iteration 的中位数和 P95，避免由单个 iteration 下结论。
+5. NPU 时间线中的空闲区间和算子 launch 间隔。
+6. 四个 rank 的最大耗时。集合通信路径由最慢 rank 决定，不能只看平均值。
+7. 多个 iteration 的中位数和 P95，避免由单个 iteration 下结论。
 
 若 CatCCOS kernel 本身明显长于 native 整条链，应继续使用真实输入进行 EP4
 standalone replay，并在 CatCCOS Device Kernel 内增加 routing、MXFP8、GMM、

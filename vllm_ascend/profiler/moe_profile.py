@@ -12,6 +12,12 @@ import torch
 from vllm_ascend import envs as ascend_envs
 
 _MOE_PROFILE_RANGES_ENABLED = ascend_envs.VLLM_ASCEND_MOE_PROFILE_RANGES
+_MOE_PROFILE_SYNC_BOUNDARIES_ENABLED = ascend_envs.VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES
+
+
+def moe_profile_sync_boundaries_enabled() -> bool:
+    """Return whether comparable synchronized MoE boundaries are enabled."""
+    return _MOE_PROFILE_RANGES_ENABLED and _MOE_PROFILE_SYNC_BOUNDARIES_ENABLED
 
 
 def moe_profile_range(

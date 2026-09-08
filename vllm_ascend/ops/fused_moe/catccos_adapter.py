@@ -206,15 +206,15 @@ def apply_catccos(
     w2: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> torch.Tensor:
-    with moe_profile_range("catccos", "total", hidden_states, topk_ids):
+    with moe_profile_range("catccos", "adapter_host_scope", hidden_states, topk_ids):
         initialize_catccos()
-        with moe_profile_range("catccos", "pre_sync", hidden_states, topk_ids):
+        with moe_profile_range("catccos", "pre_sync_host_wait", hidden_states, topk_ids):
             torch.npu.synchronize()
-        with moe_profile_range("catccos", "input_prepare", hidden_states, topk_ids):
+        with moe_profile_range("catccos", "input_prepare_host", hidden_states, topk_ids):
             x = hidden_states.contiguous()
             expert_idx = topk_ids.to(torch.int32).contiguous()
             gate_weight = topk_weights.to(torch.float32).contiguous()
-        with moe_profile_range("catccos", "kernel", hidden_states, topk_ids):
+        with moe_profile_range("catccos", "kernel_enqueue", hidden_states, topk_ids):
             output = torch.ops.catccos.ascend950_dispatch_ffn_combine(
                 x,
                 expert_idx,
@@ -225,6 +225,6 @@ def apply_catccos(
                 w2_scale,
             )
         if get_ascend_config().catccos_sync_after_launch:
-            with moe_profile_range("catccos", "post_sync", hidden_states, topk_ids):
+            with moe_profile_range("catccos", "post_sync_host_wait", hidden_states, topk_ids):
                 torch.npu.synchronize()
     return output

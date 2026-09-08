@@ -146,13 +146,13 @@ class MoECommMethod(ABC):
             torch.uint8,
         ], f"Unsupported hidden_states dtype: {fused_experts_input.hidden_states.dtype}"
 
-        moe_comm_method = _EXTRA_CTX.moe_comm_method
-        assert moe_comm_method is not None, "Missing communication context"
+        moe_comm_type = _EXTRA_CTX.moe_comm_type
+        assert moe_comm_type is not None, "Missing communication type"
 
-        profile_backend = f"native_{moe_comm_method.name.lower()}"
+        profile_backend = f"native_{moe_comm_type.name.lower()}"
         hidden_states = fused_experts_input.hidden_states
         topk_ids = fused_experts_input.topk_ids
-        with moe_profile_range(profile_backend, "total", hidden_states, topk_ids):
+        with moe_profile_range(profile_backend, "pipeline_host_scope", hidden_states, topk_ids):
             before_dispatch_evt = torch.npu.current_stream().record_event()
             routed_topk_ids = topk_ids
             if fused_experts_input.routing.log2phy is not None:
@@ -162,7 +162,7 @@ class MoECommMethod(ABC):
                 fused_experts_input=fused_experts_input,
                 topk_ids=routed_topk_ids,
             )
-            with moe_profile_range(profile_backend, "dispatch", hidden_states, topk_ids):
+            with moe_profile_range(profile_backend, "dispatch_enqueue", hidden_states, topk_ids):
                 token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
 
             mlp_compute_input = build_mlp_compute_input(
@@ -171,11 +171,11 @@ class MoECommMethod(ABC):
                 use_fusion_ops=self.use_fusion_ops,
             )
 
-            with moe_profile_range(profile_backend, "mlp", hidden_states, topk_ids):
+            with moe_profile_range(profile_backend, "mlp_enqueue", hidden_states, topk_ids):
                 mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
             before_combine_evt = torch.npu.current_stream().record_event()
-            with moe_profile_range(profile_backend, "combine", hidden_states, topk_ids):
+            with moe_profile_range(profile_backend, "combine_enqueue", hidden_states, topk_ids):
                 routed_out = self.token_dispatcher.token_combine(
                     hidden_states=mlp_output,
                     combine_metadata=token_dispatch_output.combine_metadata,

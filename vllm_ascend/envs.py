@@ -113,6 +113,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Add shape-qualified CatCCOS and native MC2 ranges to service profiler
     # traces. Disabled by default to avoid overhead outside profiling runs.
     "VLLM_ASCEND_MOE_PROFILE_RANGES": lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_PROFILE_RANGES", "0"))),
+    # Synchronize immediately before and after the common routed-expert body so
+    # its host range is directly comparable across backends. Profiling only.
+    "VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES", "0"))
+    ),
     # DEPRECATED: VLLM_ASCEND_BALANCE_SCHEDULING env var will be removed in a future release.
     # Use --additional-config '{"enable_balance_scheduling": true}' instead.
     "VLLM_ASCEND_BALANCE_SCHEDULING": lambda: bool(int(os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING", "0"))),

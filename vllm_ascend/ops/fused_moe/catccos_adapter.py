@@ -208,8 +208,6 @@ def apply_catccos(
 ) -> torch.Tensor:
     with moe_profile_range("catccos", "adapter_host_scope", hidden_states, topk_ids):
         initialize_catccos()
-        with moe_profile_range("catccos", "pre_sync_host_wait", hidden_states, topk_ids):
-            torch.npu.synchronize()
         with moe_profile_range("catccos", "input_prepare_host", hidden_states, topk_ids):
             x = hidden_states.contiguous()
             expert_idx = topk_ids.to(torch.int32).contiguous()

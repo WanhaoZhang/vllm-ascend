@@ -12,7 +12,11 @@ profile_tag=${PROFILE_TAG:?Set PROFILE_TAG to a unique output name}
 profile_root=${PROFILE_ROOT:-/home/z00956592/profiles}
 profile_dir=${profile_root}/${profile_tag}
 profile_iters=${PROFILE_ITERS:-20}
-sync_boundaries=${SYNC_BOUNDARIES:-1}
+sync_boundaries=${SYNC_BOUNDARIES:-0}
+catccos_sync_after_launch=${CATCCOS_SYNC_AFTER_LAUNCH:-false}
+catccos_max_tokens_per_rank=${CATCCOS_MAX_TOKENS_PER_RANK:-512}
+catccos_min_tokens=${CATCCOS_MIN_TOKENS:-1}
+max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS:-4096}
 model=${MODEL:-/home/weights/Qwen3-30B-A3B-Instruct-2507}
 served_model_name=${SERVED_MODEL_NAME:-qwen3-catccos}
 port=${PORT:-28001}
@@ -53,7 +57,7 @@ if [[ "${backend}" == "catccos" ]]; then
     catccos_library_dir=$(dirname "${catccos_library}")
     export LD_LIBRARY_PATH="${catccos_library_dir}:${catccos_root}/3rdparty/shmem/install/shmem/lib:${LD_LIBRARY_PATH:-}"
     additional_config=$(cat <<EOF
-{"enable_fused_mc2":1,"fused_mc2_backend":"catccos","catccos_library_path":"${catccos_library}","catccos_store_url":"${catccos_store_url}","catccos_local_mem_size":1073741824,"catccos_max_tokens_per_rank":512,"catccos_sync_after_launch":true,"catccos_min_tokens":1,"enable_prefill_mc2":true}
+{"enable_fused_mc2":1,"fused_mc2_backend":"catccos","catccos_library_path":"${catccos_library}","catccos_store_url":"${catccos_store_url}","catccos_local_mem_size":1073741824,"catccos_max_tokens_per_rank":${catccos_max_tokens_per_rank},"catccos_sync_after_launch":${catccos_sync_after_launch},"catccos_min_tokens":${catccos_min_tokens},"enable_prefill_mc2":true}
 EOF
     )
 else
@@ -63,7 +67,9 @@ fi
 echo "backend=${backend}"
 echo "profile_dir=${profile_dir}"
 echo "sync_boundaries=${sync_boundaries}"
+echo "max_num_batched_tokens=${max_num_batched_tokens}"
 echo "additional_config=${additional_config}"
+echo "Actual selected backend and global/rank-local M are recorded in vllm_ascend.moe.*.prepare/finalize profiler ranges."
 
 exec "${vllm_bin}" serve "${model}" \
     --served-model-name "${served_model_name}" \
@@ -73,7 +79,7 @@ exec "${vllm_bin}" serve "${model}" \
     --enable-expert-parallel \
     --distributed-executor-backend mp \
     --max-model-len 8192 \
-    --max-num-batched-tokens 4096 \
+    --max-num-batched-tokens "${max_num_batched_tokens}" \
     --max-num-seqs 8 \
     --gpu-memory-utilization 0.80 \
     --no-enable-prefix-caching \

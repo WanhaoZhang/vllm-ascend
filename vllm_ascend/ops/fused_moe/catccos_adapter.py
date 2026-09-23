@@ -45,6 +45,18 @@ def evaluate_catccos_layer(
     activation: Any,
     *,
     n_shared_experts: int = 0,
+    expert_map_path: str | None = None,
+    mix_placement: bool = False,
+    log2phy: torch.Tensor | None = None,
+    swiglu_limit: float = 0.0,
+    apply_router_weight_on_input: bool = False,
+    has_bias: bool = False,
+    zero_expert_type: str | None = None,
+    is_sequence_parallel: bool = False,
+    dp_size: int = 1,
+    pcp_size: int = 1,
+    speculative_model: bool = False,
+    multistream_overlap_gate: bool = False,
     device_type: AscendDeviceType | None = None,
     library_exists: bool | None = None,
 ) -> CatccosLayerCapability:
@@ -70,6 +82,26 @@ def evaluate_catccos_layer(
         return _unsupported("CatCCOS does not support dynamic EPLB")
     if n_shared_experts:
         return _unsupported("CatCCOS does not support shared experts")
+    if expert_map_path or mix_placement or log2phy is not None:
+        return _unsupported("CatCCOS requires the default contiguous expert placement")
+    if swiglu_limit:
+        return _unsupported("CatCCOS does not support a nonzero swiglu_limit")
+    if apply_router_weight_on_input:
+        return _unsupported("CatCCOS requires router weights on the combined output")
+    if has_bias:
+        return _unsupported("CatCCOS does not support expert bias")
+    if zero_expert_type is not None:
+        return _unsupported("CatCCOS does not support zero experts")
+    if is_sequence_parallel:
+        return _unsupported("CatCCOS does not support sequence parallelism")
+    if dp_size != 1:
+        return _unsupported("CatCCOS currently requires DP size 1")
+    if pcp_size != 1:
+        return _unsupported("CatCCOS currently requires PCP size 1")
+    if speculative_model:
+        return _unsupported("CatCCOS does not support speculative MoE")
+    if multistream_overlap_gate:
+        return _unsupported("CatCCOS does not support multistream gate overlap")
 
     activation_name = str(getattr(activation, "value", activation)).lower()
     if activation_name not in {"silu", "swiglu", "moeactivation.silu"}:
@@ -90,6 +122,9 @@ def evaluate_catccos_layer(
         return _unsupported("CatCCOS requires expert parallelism")
     if num_experts % ep_size:
         return _unsupported(f"experts must be divisible by EP size, got {num_experts}/{ep_size}")
+    top_k = int(moe_config.experts_per_token)
+    if top_k < 1 or top_k > num_experts:
+        return _unsupported(f"CatCCOS topK must be in [1, {num_experts}], got {top_k}")
     return CatccosLayerCapability(True)
 
 
@@ -163,6 +198,42 @@ def validate_catccos_weight_shapes(
         raise ValueError(f"CatCCOS gate/up and down-projection dimensions do not match: w1={w1.shape}, w2={w2.shape}")
     if hidden % 256 or merged_intermediate % 512:
         raise ValueError("CatCCOS requires hidden % 256 == 0 and merged intermediate % 512 == 0")
+
+
+def validate_catccos_operands(
+    x: torch.Tensor,
+    expert_idx: torch.Tensor,
+    gate_weight: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    ep_size: int,
+) -> None:
+    """Check the C++ binding contract without reading device tensor values."""
+    validate_catccos_weight_shapes(w1, w2)
+    if x.ndim != 2 or x.shape[0] == 0 or x.shape[1] != w1.shape[2] or x.dtype != torch.bfloat16:
+        raise ValueError("CatCCOS requires nonempty BF16 x with the expert hidden size")
+    if expert_idx.ndim != 2 or expert_idx.shape[0] != x.shape[0] or expert_idx.shape[1] == 0:
+        raise ValueError("CatCCOS expert_idx must have shape [M, topK] with topK > 0")
+    if expert_idx.dtype not in (torch.int32, torch.int64):
+        raise ValueError("CatCCOS expert_idx must be int32 or int64 before conversion")
+    if gate_weight.shape != expert_idx.shape or not gate_weight.is_floating_point():
+        raise ValueError("CatCCOS gate_weight must be floating point with shape [M, topK]")
+    if w1.shape[0] * ep_size < expert_idx.shape[1]:
+        raise ValueError("CatCCOS topK exceeds the total expert count")
+    scale_k = ((w1.shape[2] + 31) // 32 + 1) // 2 * 2
+    scale_k2 = ((w2.shape[2] + 31) // 32 + 1) // 2 * 2
+    if w1_scale.shape != (w1.shape[0], w1.shape[1], scale_k):
+        raise ValueError("CatCCOS w1_scale has an invalid MXFP8 shape")
+    if w2_scale.shape != (w2.shape[0], w2.shape[1], scale_k2):
+        raise ValueError("CatCCOS w2_scale has an invalid MXFP8 shape")
+    if w1.dtype != torch.float8_e4m3fn or w2.dtype != torch.float8_e4m3fn:
+        raise ValueError("CatCCOS expert weights must be MXFP8 E4M3")
+    if w1_scale.dtype != torch.float8_e8m0fnu or w2_scale.dtype != torch.float8_e8m0fnu:
+        raise ValueError("CatCCOS expert scales must be MXFP8 E8M0")
+    if any(t.device != x.device for t in (expert_idx, gate_weight, w1, w1_scale, w2, w2_scale)):
+        raise ValueError("CatCCOS operands must be on the same device")
 
 
 def _set_runtime_buffer(

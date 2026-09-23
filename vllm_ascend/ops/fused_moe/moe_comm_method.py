@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 import torch
@@ -28,6 +29,7 @@ from vllm_ascend.ops.fused_moe.catccos_adapter import (
     CatccosLayerCapability,
     apply_catccos,
     catccos_backend_enabled,
+    validate_catccos_operands,
 )
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
@@ -62,17 +64,38 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
 def setup_moe_comm_method(
     moe_config,
     catccos_capability: CatccosLayerCapability | None = None,
-):
+) -> dict[MoECommType, MoECommMethod]:
+    methods: dict[MoECommType, MoECommMethod] = {}
     if moe_config.ep_size > 1:
-        _MoECommMethods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
-        _MoECommMethods[MoECommType.MC2] = MC2CommImpl(moe_config)
-        _MoECommMethods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
+        methods[MoECommType.ALLTOALL] = AlltoAllCommImpl(moe_config)
+        methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        methods[MoECommType.MC2] = MC2CommImpl(moe_config)
+        methods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
             moe_config,
             catccos_capability=catccos_capability,
         )
     else:
-        _MoECommMethods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+        methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
+    # Keep the existing global lookup for forward-context setup and non-0.23
+    # callers. The v0.23 runner binds its own layer's instance for execution.
+    _MoECommMethods.update(methods)
+    return methods
+
+
+@contextmanager
+def bind_layer_moe_comm_method(methods: dict[MoECommType, MoECommMethod] | None):
+    if methods is None:
+        yield
+        return
+    moe_comm_type = _EXTRA_CTX.moe_comm_type
+    if moe_comm_type not in methods:
+        raise RuntimeError(f"No MoE communication method for {moe_comm_type}")
+    previous_method = _EXTRA_CTX.moe_comm_method
+    _EXTRA_CTX.moe_comm_method = methods[moe_comm_type]
+    try:
+        yield
+    finally:
+        _EXTRA_CTX.moe_comm_method = previous_method
 
 
 def set_gmmswigluquant_method():
@@ -326,11 +349,32 @@ class FusedMC2CommImpl(MoECommMethod):
         if catccos_backend_enabled():
             if not self.catccos_capability.supported:
                 raise RuntimeError(f"CatCCOS was selected for an unsupported layer: {self.catccos_capability.reason}")
+            routing = fused_experts_input.routing
+            if (
+                routing.log2phy is not None
+                or routing.global_redundant_expert_num
+                or routing.apply_router_weight_on_input
+                or fused_experts_input.swiglu_limit
+                or fused_experts_input.weights.w1_bias is not None
+                or fused_experts_input.weights.w2_bias is not None
+                or fused_experts_input.lora_context is not None
+            ):
+                raise RuntimeError("CatCCOS received unsupported routing or expert parameters")
             weights = fused_experts_input.weights
             if not isinstance(weights.w1, torch.Tensor) or not isinstance(weights.w2, torch.Tensor):
                 raise RuntimeError("CatCCOS requires packed expert weights as tensors")
             if not isinstance(weights.w1_scale, torch.Tensor) or not isinstance(weights.w2_scale, torch.Tensor):
                 raise RuntimeError("CatCCOS requires MXFP8 weight scales")
+            validate_catccos_operands(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids,
+                fused_experts_input.topk_weights,
+                weights.w1,
+                weights.w1_scale,
+                weights.w2,
+                weights.w2_scale,
+                self.moe_config.ep_size,
+            )
             out = apply_catccos(
                 fused_experts_input.hidden_states,
                 fused_experts_input.topk_ids,

@@ -31,6 +31,9 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+NATIVE_MC2_MAX_TOKENS_PER_RANK = 512
+
+
 def _catccos_backend_enabled() -> bool:
     config = get_ascend_config()
     return config.enable_fused_mc2 == 1 and getattr(config, "fused_mc2_backend", "auto") == "catccos"
@@ -201,11 +204,12 @@ def set_ascend_forward_context(
 
 
 _mc2_tokens_capacity: int | None = None
+_catccos_tokens_capacity: int | None = None
 _reserved_mc2_mask: torch.Tensor | None = None
 
 
 def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len):
-    global _mc2_tokens_capacity
+    global _mc2_tokens_capacity, _catccos_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
     if get_ascend_config().enable_prefill_mc2:
@@ -217,15 +221,25 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     tp_size = vllm_config.parallel_config.tensor_parallel_size
     # Use integer arithmetic for ceiling division.
     num_tokens_per_tp_rank = (max_num_tokens + tp_size - 1) // tp_size
-    max_tokens_per_rank = (
-        getattr(get_ascend_config(), "catccos_max_tokens_per_rank", 512) if _catccos_backend_enabled() else 512
-    )
-    num_tokens_per_tp_rank = min(num_tokens_per_tp_rank, max_tokens_per_rank)
-    _mc2_tokens_capacity = num_tokens_per_tp_rank * tp_size
+    _mc2_tokens_capacity = min(num_tokens_per_tp_rank, NATIVE_MC2_MAX_TOKENS_PER_RANK) * tp_size
+    if _catccos_backend_enabled():
+        # CatCCOS can serve prefill independently of native prefill MC2.
+        scheduler_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        catccos_tokens_per_rank = min(
+            (scheduler_tokens + tp_size - 1) // tp_size,
+            get_ascend_config().catccos_max_tokens_per_rank,
+        )
+        _catccos_tokens_capacity = catccos_tokens_per_rank * tp_size
+    else:
+        _catccos_tokens_capacity = None
 
 
 def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
+
+
+def get_catccos_tokens_capacity():
+    return _catccos_tokens_capacity
 
 
 def set_mc2_mask(vllm_config, device):
@@ -293,6 +307,7 @@ def _select_a5_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    is_draft_model: bool = False,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -300,15 +315,18 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
-    if _catccos_backend_enabled():
+    if _catccos_backend_enabled() and not is_draft_model:
         min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
-        if min_tokens <= num_tokens <= mc2_tokens_capacity and world_size > 1:
+        catccos_capacity = get_catccos_tokens_capacity()
+        if catccos_capacity is not None and min_tokens <= num_tokens <= catccos_capacity and world_size > 1:
             return MoECommType.FUSED_MC2
         if num_tokens < min_tokens:
             logger.info_once(
-                "CatCCOS is disabled below M=%d; using native MoE for M=%d",
+                "CatCCOS is disabled below global M=%d; using native MoE for global M=%d (rank-local M=%d)",
                 min_tokens,
                 num_tokens,
+                (num_tokens + vllm_config.parallel_config.tensor_parallel_size - 1)
+                // vllm_config.parallel_config.tensor_parallel_size,
             )
     if num_tokens <= mc2_tokens_capacity and world_size > 1:
         return MoECommType.MC2
@@ -368,18 +386,22 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
             get_ascend_config().enable_fused_mc2,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity, is_draft_model)
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     logger.debug(
-        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        "MoE comm method selected: soc=%s, method=%s, global_M=%d, rank_local_M=%d, "
+        "native_mc2_capacity=%s, catccos_capacity=%s",
         soc_version,
         moe_comm_type,
         num_tokens,
+        (num_tokens + vllm_config.parallel_config.tensor_parallel_size - 1)
+        // vllm_config.parallel_config.tensor_parallel_size,
         mc2_tokens_capacity,
+        get_catccos_tokens_capacity() if soc_version == AscendDeviceType.A5 else None,
     )
     return moe_comm_type
 

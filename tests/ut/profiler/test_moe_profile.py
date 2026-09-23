@@ -31,6 +31,23 @@ def test_profile_range_contains_backend_stage_and_real_shape():
     record_function.assert_called_once_with("vllm_ascend.moe.native_mc2.dispatch_enqueue[M=138,H=2048,topK=8]")
 
 
+def test_phase_range_distinguishes_global_and_rank_local_tokens():
+    with (
+        patch.object(moe_profile, "_MOE_PROFILE_RANGES_ENABLED", True),
+        patch.object(torch.profiler, "record_function") as record_function,
+    ):
+        moe_profile.moe_profile_phase(
+            "catccos",
+            "finalize",
+            global_tokens=4096,
+            rank_local_tokens=1024,
+            hidden_size=2048,
+            top_k=8,
+        )
+
+    record_function.assert_called_once_with("vllm_ascend.moe.catccos.finalize[global_M=4096,rank_M=1024,H=2048,topK=8]")
+
+
 def test_sync_boundaries_require_ranges_and_sync_switch():
     with (
         patch.object(moe_profile, "_MOE_PROFILE_RANGES_ENABLED", True),

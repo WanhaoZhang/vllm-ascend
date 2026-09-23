@@ -14,13 +14,13 @@
 codex/megamoe-a5-vllm-v023-service-profiling
 ```
 
-配套的 CatCCOS Host 细分打点位于 CatCCOS 分支：
+本轮配套的 CatCCOS 算子基线位于 CatCCOS 分支：
 
 ```text
-codex/megamoe-vllm-service-profiling
+codex/megamoe-vllm-kernel-reset (351af32)
 ```
 
-该 CatCCOS 分支基于已解决连续 `M=1` launch 卡死的 `722a201`。每次 launch
+该 CatCCOS 分支包含已解决连续 `M=1` launch 卡死的修改。每次 launch
 仍然完整执行 metadata 清零、workspace full-clean、symmetric-A full-clean 和
 rank barrier；profiling 只在这些操作外增加 Host user-scope，不改变同步、清零、
 buffer 或 kernel launch 语义。
@@ -138,8 +138,8 @@ git rev-parse HEAD
 cd /home/z00956592/catccos
 
 git fetch git@github.com:WanhaoZhang/CATCCOS.git \
-  codex/megamoe-vllm-service-profiling
-git switch -C codex/megamoe-vllm-service-profiling FETCH_HEAD
+  codex/megamoe-vllm-kernel-reset
+git switch -C codex/megamoe-vllm-kernel-reset FETCH_HEAD
 
 bash examples/ascend950_dispatch_ffn_combine/scripts/build_python.sh
 git rev-parse HEAD
@@ -166,8 +166,8 @@ tools/catccos_profiling/start_aligned_service.sh
 ```
 
 它强制两边使用 `OMP_NUM_THREADS=1`、`enable_prefill_mc2=true`、相同 TP/EP、
-batch capacity 和 profiler 配置。默认 `SYNC_BOUNDARIES=1`，用于比较相同完成
-边界。CatCCOS 轮：
+batch capacity 和 profiler 配置。默认关闭 `SYNC_BOUNDARIES` 与
+`catccos_sync_after_launch`，以保留真实异步流水。CatCCOS 轮：
 
 ```bash
 cd /home/z00956592/vllm-ascend-catccos
@@ -187,8 +187,28 @@ bash tools/catccos_profiling/start_aligned_service.sh native
 ```
 
 每个 `PROFILE_TAG` 必须唯一；脚本发现目录已存在时会退出，避免覆盖原始数据。
-需要观察自然服务流水时，另起一轮显式设置 `SYNC_BOUNDARIES=0`。正式吞吐、TTFT
-和 TPOT 必须关闭 profiler 测量。
+只有诊断同步完成边界时，才另起一轮显式设置 `SYNC_BOUNDARIES=1`；需要检查
+CatCCOS launch 后等待时，再设置 `CATCCOS_SYNC_AFTER_LAUNCH=true`。这两类 trace
+不能和默认异步 trace 混合计算吞吐。正式吞吐、TTFT 和 TPOT 必须关闭 profiler。
+
+`CATCCOS_MAX_TOKENS_PER_RANK` 默认 512，`MAX_NUM_BATCHED_TOKENS` 默认 4096。
+要测试 rank-local M=1024/2048/4096，需同时提高这两个值，例如 M=1024、TP4
+时设为 1024 和 4096。CatCCOS 与 native 的容量独立：native MC2 仍最多每 rank
+512 token，较大 M 可能走 ALLGATHER。查看 trace 中的
+`vllm_ascend.moe.<backend>.prepare/finalize[global_M=...,rank_M=...]`，按实际
+backend 配对样本；finalize 内的 TP all_gather 用于还原 CatCCOS 的 token 切片。
+
+接入侧验收按以下顺序进行，保持 CatCCOS/native 的 TP4、EP4、模型、调度器
+budget 和请求输入相同：
+
+1. 预热并检查 decode、global M 非 4 的整倍数、rank-local M=512/1024/2048/4096。
+   确认两侧输出形状与顺序一致，padding 未进入有效输出，各 rank 均选到同一 backend。
+2. 对 CatCCOS 的 FUSED_MC2 样本检查 `prepare` 切成 rank-local M，`finalize` 中
+   一次 TP all_gather 恢复 global M，`outer_reduce_check` 内没有额外 TP all-reduce。
+   高于原生 MC2 每 rank 512 的样本须记录 native 实际回退路径。
+3. 对照逐层输出误差、GSM8K 200 题准确率与整网吞吐；导出每档
+   prepare、kernel、finalize 的 host/device 耗时及 gather/reduce 次数。
+   未满足正确性和选路检查的样本不用于 kernel 性能归因。
 
 以下手工配置用于理解脚本内容或适配已有启动脚本。
 
@@ -397,9 +417,10 @@ python3 /home/z00956592/bigm_perf_test.py 1 552 1 1
 curl -fsS -X POST http://127.0.0.1:28001/stop_profile
 ```
 
-该请求在 TP4 下应显示 `M=138`。使用 2048-token prompt 可以测容量边界
-`M=512`。不要用 4096-token prefill 对比 CatCCOS，因为当前配置的 CatCCOS
-全局容量是 `512 × TP4 = 2048`，更大的 batch 可能回退到其他路径。
+该请求在 TP4 下应显示 `M=138`。使用 2048-token prompt 可以测默认容量边界
+`M=512`。测试 4096-token prefill 时，需要设置
+`CATCCOS_MAX_TOKENS_PER_RANK=1024` 和 `MAX_NUM_BATCHED_TOKENS=4096`；
+否则 CatCCOS 会按默认容量回退到 native 路径。
 
 ## 7. 解析 profiling 文件
 

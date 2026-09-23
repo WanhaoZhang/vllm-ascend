@@ -35,3 +35,22 @@ def moe_profile_range(
     top_k = topk_ids.shape[-1]
     name = f"vllm_ascend.moe.{backend}.{stage}[M={tokens},H={hidden_size},topK={top_k}]"
     return torch.profiler.record_function(name)
+
+
+def moe_profile_phase(
+    backend: str,
+    stage: str,
+    *,
+    global_tokens: int,
+    rank_local_tokens: int,
+    hidden_size: int,
+    top_k: int,
+) -> AbstractContextManager:
+    """Identify both token layouts around prepare and finalize, without a sync."""
+    if not _MOE_PROFILE_RANGES_ENABLED:
+        return nullcontext()
+    name = (
+        f"vllm_ascend.moe.{backend}.{stage}"
+        f"[global_M={global_tokens},rank_M={rank_local_tokens},H={hidden_size},topK={top_k}]"
+    )
+    return torch.profiler.record_function(name)

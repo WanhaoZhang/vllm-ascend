@@ -48,6 +48,25 @@ def test_phase_range_distinguishes_global_and_rank_local_tokens():
     record_function.assert_called_once_with("vllm_ascend.moe.catccos.finalize[global_M=4096,rank_M=1024,H=2048,topK=8]")
 
 
+def test_component_range_uses_explicit_shape_metadata():
+    with (
+        patch.object(moe_profile, "_MOE_PROFILE_RANGES_ENABLED", True),
+        patch.object(torch.profiler, "record_function") as record_function,
+    ):
+        moe_profile.moe_profile_component(
+            "native_allgather",
+            "outer_reduce.tp_all_reduce",
+            global_tokens=4096,
+            rank_local_tokens=4096,
+            hidden_size=2048,
+            top_k=8,
+        )
+
+    record_function.assert_called_once_with(
+        "vllm_ascend.moe.native_allgather.outer_reduce.tp_all_reduce[global_M=4096,rank_M=4096,H=2048,topK=8]"
+    )
+
+
 def test_sync_boundaries_require_ranges_and_sync_switch():
     with (
         patch.object(moe_profile, "_MOE_PROFILE_RANGES_ENABLED", True),

@@ -54,3 +54,29 @@ def moe_profile_phase(
         f"[global_M={global_tokens},rank_M={rank_local_tokens},H={hidden_size},topK={top_k}]"
     )
     return torch.profiler.record_function(name)
+
+
+def moe_profile_component(
+    backend: str,
+    component: str,
+    *,
+    global_tokens: int,
+    rank_local_tokens: int,
+    hidden_size: int,
+    top_k: int,
+) -> AbstractContextManager:
+    """Record a non-overlapping MoE component with explicit token metadata.
+
+    Component ranges are intentionally separate from the larger prepare,
+    finalize, and MoE-body ranges.  The profiling summarizer uses them to
+    estimate the contribution of allocation, collective, copy, and kernel
+    stages without changing the execution order.
+    """
+    return moe_profile_phase(
+        backend,
+        component,
+        global_tokens=global_tokens,
+        rank_local_tokens=rank_local_tokens,
+        hidden_size=hidden_size,
+        top_k=top_k,
+    )

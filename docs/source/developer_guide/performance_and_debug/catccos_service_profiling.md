@@ -110,8 +110,10 @@ export VLLM_ASCEND_MOE_PROFILE_SYNC_BOUNDARIES=1
 才能直接比较。额外同步会改变 native 的正常 overlap，只用于诊断，不能用它
 产生正式服务吞吐、TTFT 或 TPOT 数据。
 
-名称中的 `M` 是 MC2 padding 和 TP 切分之后的真实 rank-local token 数。
-在 TP4 下：
+旧版范围名中的 `M` 需要结合范围位置解释：`host_moe_body`、`prepare` 和
+`native_allgather` 的 pipeline 输入是全局 token；CatCCOS binding、native MC2
+或 ALLTOALL pipeline 输入是 TP 切分后的 rank-local token。本分支新增的
+`global_M`/`rank_M` 会同时写出两者。在 TP4 下，切分路径的对应关系是：
 
 ```text
 全局 decode T=8     → rank-local M=2
@@ -467,7 +469,89 @@ python tools/catccos_profiling/extract_ranges.py \
 `catccos.a5.binding.*`，完整保留 `M/H/N/topK`，按每个 rank 的
 `operator_details.csv` 输出 count、Host P50、P95 和最大值。
 
-## 8. trace 中搜索的名称
+## 8. 大 M 分段统计与占比
+
+本分支额外记录以下非重叠组件范围。范围名中同时保留全局 M 和 rank-local M：
+
+```text
+vllm_ascend.moe.catccos.prepare.padding
+vllm_ascend.moe.catccos.prepare.tensor_split
+vllm_ascend.moe.catccos.prepare.mc2_mask_split
+vllm_ascend.moe.catccos.finalize.output_alloc
+vllm_ascend.moe.catccos.finalize.tensor_split
+vllm_ascend.moe.catccos.finalize.tp_all_gather
+vllm_ascend.moe.catccos.finalize.unpad
+vllm_ascend.moe.native_allgather.outer_reduce.tp_all_reduce
+vllm_ascend.moe.native_allgather.outer_reduce.skip
+```
+
+例如：
+
+```text
+vllm_ascend.moe.catccos.finalize.tp_all_gather[
+  global_M=4096,rank_M=1024,H=2048,topK=8]
+```
+
+在容器内生成汇总表：
+
+```bash
+cd /home/z00956592/vllm-ascend-catccos
+
+python3 tools/catccos_profiling/summarize_moe_stats.py \
+  /home/z00956592/profiles/catccos_m1024 \
+  --tp-size 4 \
+  --output /home/z00956592/profiles/catccos_m1024/moe_stats.csv
+```
+
+同时比较 CatCCOS 和 native：
+
+```bash
+python3 tools/catccos_profiling/summarize_moe_stats.py \
+  /home/z00956592/profiles/catccos_m1024 \
+  /home/z00956592/profiles/native_m1024 \
+  --tp-size 4 \
+  --output /home/z00956592/profiles/m1024_moe_stats.csv
+```
+
+输出中的字段含义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `host_p50_us` / `host_p95_us` | Host 范围耗时 |
+| `device_p50_us` / `device_p95_us` / `device_max_us` | Device 范围耗时 |
+| `host_share_of_body_pct` | 该范围 P50 Host 时间占 `host_moe_body` 的比例 |
+| `device_share_of_body_pct` | 该范围 P50 Device 时间占 MoE body 的比例 |
+
+share 是单个范围相对 body 的占比，嵌套范围之间不能直接相加。判断大 M 根因时优先看：
+
+1. `catccos.finalize.tp_all_gather`：TP gather 是否占主要时间；
+2. `catccos.a5.binding.*`：CatCCOS kernel enqueue、动态 tiling 和 device kernel 时间；
+3. `native_allgather.outer_reduce.tp_all_reduce`：native 的真实外层归约成本；
+4. `global_M` 与 `rank_M`：确认比较的是相同的 rank-local M。
+
+## 9. 同步诊断与正式吞吐的区别
+
+CatCCOS 默认异步提交，`kernel_enqueue` 很快返回，后续 collective 可能承担等待时间。每个 M 建议额外抓一轮：
+
+```bash
+CATCCOS_SYNC_AFTER_LAUNCH=true \
+SYNC_BOUNDARIES=1 \
+PROFILE_TAG=catccos_m1024_sync \
+bash tools/catccos_profiling/start_aligned_service.sh catccos
+```
+
+该轮只用于判断 kernel wait 是否被归入 finalize；正式吞吐仍使用：
+
+```bash
+CATCCOS_SYNC_AFTER_LAUNCH=false
+SYNC_BOUNDARIES=0
+```
+
+如果同步后 `finalize.tp_all_gather` 缩短而总时间不变，说明原 trace 中包含了
+CatCCOS kernel 的隐式等待。如果同步后 CatCCOS body 仍明显慢，则继续检查
+kernel tiling 和通信本身。
+
+## 10. trace 中搜索的名称
 
 CatCCOS：
 
@@ -508,7 +592,7 @@ vllm_ascend.moe.catccos.kernel_enqueue[M=2,H=2048,topK=8]
 vllm_ascend.moe.native_mc2.dispatch_enqueue[M=2,H=2048,topK=8]
 ```
 
-## 9. A/B 判读方式
+## 11. A/B 判读方式
 
 同一 workload、同一 `M` 下比较：
 
@@ -532,9 +616,9 @@ profiling 会影响服务速度，因此 Output Token Throughput、TTFT 和 TPOT
 A/B 数值仍以关闭 profiler 的原始 200 题复测为准。服务内 profiling 用来解释
 性能差距来自 kernel、同步、launch、通信还是 rank 长尾。
 
-## 10. 本轮应执行的收敛顺序
+## 12. 本轮应执行的收敛顺序
 
-### 10.1 先复用已有 trace
+### 12.1 先复用已有 trace
 
 先对已有 `catccos_load_r1` 和 `native_load_r1` 执行第 7 节两个工具。原始 trace
 中的 range 名保留了真实 `M`，不要再使用将 `M` 统一替换成占位符的旧脚本。
@@ -550,7 +634,7 @@ A/B 数值仍以关闭 profiler 的原始 200 题复测为准。服务内 profil
 已有自然服务轮可以显示真实流水，但不能直接相减 CatCCOS/native 的
 `host_moe_body`，因为 CatCCOS 包含同步完成等待，而 native 主要是异步下发。
 
-### 10.2 再跑严格对齐轮
+### 12.2 再跑严格对齐轮
 
 使用第 3 节统一启动脚本，依次抓：
 
@@ -563,7 +647,7 @@ A/B 数值仍以关闭 profiler 的原始 200 题复测为准。服务内 profil
 每个场景分别运行 CatCCOS 和 native。只配对 backend、M、H、topK、rank 都一致
 的样本，并同时记录 P50、P95 和四个 rank 的最大值。
 
-### 10.3 用新增细分 range 判断下一步
+### 12.3 用新增细分 range 判断下一步
 
 按下面顺序判读：
 

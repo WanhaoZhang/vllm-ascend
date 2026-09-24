@@ -117,7 +117,20 @@ class AscendMoERunner(MoERunner):
             hidden_size=states.shape[-1],
             top_k=self.moe_config.experts_per_token,
         ):
-            states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
+            reduce_stage = (
+                "outer_reduce.tp_all_reduce"
+                if moe_comm_type == MoECommType.ALLGATHER and not _EXTRA_CTX.flash_comm_v1_enabled
+                else "outer_reduce.skip"
+            )
+            with moe_profile_phase(
+                backend,
+                reduce_stage,
+                global_tokens=states.shape[0],
+                rank_local_tokens=states.shape[0],
+                hidden_size=states.shape[-1],
+                top_k=self.moe_config.experts_per_token,
+            ):
+                states = torch.ops.vllm.maybe_all_reduce_tensor_model_parallel(states)
         return states[..., :trunc_size]
 
     # TODO: Remove this after drop v0.19.1 support
@@ -535,11 +548,15 @@ class AscendFusedMoE(FusedMoE):
             else f"native_{moe_comm_type.name.lower()}"
         )
         global_tokens = hidden_states.shape[0]
+        rank_local_tokens = global_tokens
+        if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}:
+            tp_size = max(1, get_tp_group().world_size)
+            rank_local_tokens = (global_tokens + tp_size - 1) // tp_size
         with moe_profile_phase(
             backend,
             "prepare",
             global_tokens=global_tokens,
-            rank_local_tokens=global_tokens,
+            rank_local_tokens=rank_local_tokens,
             hidden_size=hidden_states.shape[-1],
             top_k=self.top_k,
         ):

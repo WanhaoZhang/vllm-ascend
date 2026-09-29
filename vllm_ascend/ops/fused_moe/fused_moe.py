@@ -126,16 +126,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight = torch.nn.Parameter(w2_data, requires_grad=False)
 
-        # TODO: Current dispatch_ffn_combine fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
+        # CANN dispatch_ffn_combine requires NZ weights. CatCCOS uses separate
+        # MXFP8 weights, so its BF16 fallback follows the native format policy.
+        # TODO: Remove the forced NZ cast when CANN fused MC2 supports ND weights.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
-        if enable_fused_mc2:
-            if catccos_backend_enabled():
-                prepare_catccos_weights(layer)
+        if catccos_backend_enabled():
+            prepare_catccos_weights(layer)
+            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
+            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
+        elif enable_fused_mc2:
             layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
             layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
             if enable_fused_mc2 == 1 and self.dynamic_eplb:

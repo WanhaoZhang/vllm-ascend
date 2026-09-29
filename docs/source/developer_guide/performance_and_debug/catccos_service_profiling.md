@@ -1,5 +1,10 @@
 # CatCCOS 与 native MC2 服务内 A/B profiling
 
+> **当前分支的选路说明**：本文件保留早期大 M CatCCOS 实验的 trace 分析流程。
+> 从生产接入修改起，A5 CatCCOS 只替换原生 MC2；超过原生 MC2 容量的请求
+> 即使调高 `CATCCOS_MAX_TOKENS_PER_RANK`，仍走原生 ALLGATHER/ALLTOALL。
+> 新的无 profiler 服务 A/B 方法见 [AISBench 测试计划](catccos_aisbench_ab.md)。
+
 ## 1. 分支和实现范围
 
 本 profiling 分支基于 CatCCOS A5 正式接入提交：
@@ -194,9 +199,9 @@ CatCCOS launch 后等待时，再设置 `CATCCOS_SYNC_AFTER_LAUNCH=true`。这�
 不能和默认异步 trace 混合计算吞吐。正式吞吐、TTFT 和 TPOT 必须关闭 profiler。
 
 `CATCCOS_MAX_TOKENS_PER_RANK` 默认 512，`MAX_NUM_BATCHED_TOKENS` 默认 4096。
-要测试 rank-local M=1024/2048/4096，需同时提高这两个值，例如 M=1024、TP4
-时设为 1024 和 4096。CatCCOS 与 native 的容量独立：native MC2 仍最多每 rank
-512 token，较大 M 可能走 ALLGATHER。查看 trace 中的
+CatCCOS 的实际替换上限是其配置容量与原生 MC2 容量的较小值；在 TP4 下
+原生 MC2 最多为 global M=2048。rank-local M=1024/2048/4096 的新实验
+会走原生回退路径，早期 trace 中的 CatCCOS 大 M 样本仅用于历史分析。查看 trace 中的
 `vllm_ascend.moe.<backend>.prepare/finalize[global_M=...,rank_M=...]`，按实际
 backend 配对样本；finalize 内的 TP all_gather 用于还原 CatCCOS 的 token 切片。
 
@@ -207,7 +212,7 @@ budget 和请求输入相同：
    确认两侧输出形状与顺序一致，padding 未进入有效输出，各 rank 均选到同一 backend。
 2. 对 CatCCOS 的 FUSED_MC2 样本检查 `prepare` 切成 rank-local M，`finalize` 中
    一次 TP all_gather 恢复 global M，`outer_reduce_check` 内没有额外 TP all-reduce。
-   高于原生 MC2 每 rank 512 的样本须记录 native 实际回退路径。
+   高于原生 MC2 每 rank 512 的样本应在两侧走相同的原生回退路径。
 3. 对照逐层输出误差、GSM8K 200 题准确率与整网吞吐；导出每档
    prepare、kernel、finalize 的 host/device 耗时及 gather/reduce 次数。
    未满足正确性和选路检查的样本不用于 kernel 性能归因。
@@ -420,9 +425,8 @@ curl -fsS -X POST http://127.0.0.1:28001/stop_profile
 ```
 
 该请求在 TP4 下应显示 `M=138`。使用 2048-token prompt 可以测默认容量边界
-`M=512`。测试 4096-token prefill 时，需要设置
-`CATCCOS_MAX_TOKENS_PER_RANK=1024` 和 `MAX_NUM_BATCHED_TOKENS=4096`；
-否则 CatCCOS 会按默认容量回退到 native 路径。
+`M=512`。测试 4096-token prefill 时，若 budget 为 4096，当前生产选路在两侧
+均回退到原生 ALLGATHER；调高 CatCCOS 容量也不会改变这一点。
 
 ## 7. 解析 profiling 文件
 
@@ -536,7 +540,7 @@ CatCCOS 默认异步提交，`kernel_enqueue` 很快返回，后续 collective �
 ```bash
 CATCCOS_SYNC_AFTER_LAUNCH=true \
 SYNC_BOUNDARIES=1 \
-PROFILE_TAG=catccos_m1024_sync \
+PROFILE_TAG=catccos_m512_sync \
 bash tools/catccos_profiling/start_aligned_service.sh catccos
 ```
 

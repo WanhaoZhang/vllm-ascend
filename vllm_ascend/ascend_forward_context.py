@@ -318,7 +318,13 @@ def _select_a5_moe_comm_method(
     if _catccos_backend_enabled() and not is_draft_model:
         min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
         catccos_capacity = get_catccos_tokens_capacity()
-        if catccos_capacity is not None and min_tokens <= num_tokens <= catccos_capacity and world_size > 1:
+        # CatCCOS replaces native MC2 only. Larger batches retain A5's native
+        # ALLGATHER/ALLTOALL selection even if the CatCCOS kernel can accept them.
+        if (
+            catccos_capacity is not None
+            and min_tokens <= num_tokens <= min(catccos_capacity, mc2_tokens_capacity)
+            and world_size > 1
+        ):
             return MoECommType.FUSED_MC2
         if num_tokens < min_tokens:
             logger.info_once(
@@ -347,9 +353,9 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig, is_draft_mo
        quantization with small EP size, no dynamic_eplb, and not in MTP
        mode; otherwise use MC2 within capacity or all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, optionally replace native MC2 with CatCCOS
+       when both capacities allow it; otherwise keep the native MC2,
+       all-gather, or all-to-all selection.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.

@@ -397,6 +397,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         mock_ascend_config = MagicMock()
         mock_ascend_config.enable_fused_mc2 = enable_fused_mc2
         monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: mock_ascend_config)
+        monkeypatch.setattr(fused_moe_module, "catccos_backend_enabled", lambda: False)
         monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
         monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
 
@@ -410,6 +411,27 @@ class TestAscendUnquantizedFusedMoEMethod:
         else:
             assert maybe_trans_nz.call_count == 2
             format_cast.assert_not_called()
+
+    def test_catccos_preserves_native_bf16_fallback_weight_format(self, monkeypatch):
+        method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
+        method.dynamic_eplb = False
+        method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
+        layer = self._build_layer()
+        prepare_catccos_weights = MagicMock()
+        maybe_trans_nz = MagicMock(side_effect=lambda weight: weight)
+        format_cast = MagicMock(side_effect=lambda weight, _: weight)
+
+        monkeypatch.setattr(fused_moe_module, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+        monkeypatch.setattr(fused_moe_module, "catccos_backend_enabled", lambda: True)
+        monkeypatch.setattr(fused_moe_module, "prepare_catccos_weights", prepare_catccos_weights)
+        monkeypatch.setattr(fused_moe_module, "maybe_trans_nz", maybe_trans_nz)
+        monkeypatch.setattr(fused_moe_module.torch_npu, "npu_format_cast", format_cast)
+
+        method.process_weights_after_loading(layer)
+
+        prepare_catccos_weights.assert_called_once_with(layer)
+        assert maybe_trans_nz.call_count == 2
+        format_cast.assert_not_called()
 
     def test_process_weights_after_loading_splits_dynamic_eplb_fused_mc2_weights(self, monkeypatch):
         method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)

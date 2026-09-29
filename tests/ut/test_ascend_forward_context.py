@@ -313,11 +313,13 @@ def test_select_moe_comm_method_a5_catccos(monkeypatch, num_tokens, expected):
     [
         (63, MoECommType.MC2),
         (64, MoECommType.FUSED_MC2),
-        (4096, MoECommType.FUSED_MC2),
+        (2048, MoECommType.FUSED_MC2),
+        (2049, MoECommType.ALLGATHER),
+        (4096, MoECommType.ALLGATHER),
         (4097, MoECommType.ALLGATHER),
     ],
 )
-def test_select_catccos_above_native_capacity_and_at_threshold(monkeypatch, num_tokens, expected):
+def test_select_catccos_only_replaces_native_mc2(monkeypatch, num_tokens, expected):
     _patch_select_moe_comm_method_deps(
         monkeypatch,
         device_type=afc.AscendDeviceType.A5,
@@ -333,8 +335,53 @@ def test_select_catccos_above_native_capacity_and_at_threshold(monkeypatch, num_
     config = _make_vllm_config(world_size=4, tensor_parallel_size=4, top_k_experts=8)
 
     assert afc.select_moe_comm_method(num_tokens, config) == expected
-    if num_tokens == 4096:
-        assert afc.select_moe_comm_method(num_tokens, config, is_draft_model=True) == MoECommType.ALLGATHER
+    if num_tokens == 2048:
+        assert afc.select_moe_comm_method(num_tokens, config, is_draft_model=True) == MoECommType.MC2
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "expected"),
+    [
+        (1024, MoECommType.FUSED_MC2),
+        (1025, MoECommType.MC2),
+        (2049, MoECommType.ALLTOALL),
+    ],
+)
+def test_catccos_smaller_capacity_and_native_alltoall_fallback(monkeypatch, num_tokens, expected):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=2048,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=1, fused_mc2_backend="catccos", catccos_min_tokens=1),
+    )
+    monkeypatch.setattr(afc, "get_catccos_tokens_capacity", lambda: 1024)
+    config = _make_vllm_config(world_size=8, tensor_parallel_size=4, top_k_experts=4)
+
+    assert afc.select_moe_comm_method(num_tokens, config) == expected
+
+
+def test_catccos_cannot_expand_decode_only_native_mc2_capacity(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(enable_fused_mc2=1, fused_mc2_backend="catccos", catccos_min_tokens=1),
+    )
+    monkeypatch.setattr(afc, "get_catccos_tokens_capacity", lambda: 4096)
+    config = _make_vllm_config(world_size=4, tensor_parallel_size=4, top_k_experts=8)
+
+    assert afc.select_moe_comm_method(8, config) == MoECommType.FUSED_MC2
+    assert afc.select_moe_comm_method(9, config) == MoECommType.ALLGATHER
 
 
 def test_catccos_minimum_falls_back_without_exceeding_native_mc2_limit(monkeypatch):

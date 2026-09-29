@@ -2,7 +2,7 @@
 
 ## 目标与比较边界
 
-本计划比较同一台 A5、同一个 Qwen3-30B-A3B-Instruct-2507 服务在真实负载下的
+本计划比较同一台 A5、同一个 Qwen3-30B-A3B-Instruct-2507 服务在可复现公开负载和业务负载下的
 两种配置：原生 MC2 与仅在原生 MC2 区间启用 CatCCOS。记录以下两种收益：
 
 1. 相同输入、输出和到达速率下的 TTFT、TPOT、E2E 延迟变化。
@@ -85,17 +85,52 @@ host_ip="127.0.0.1"
 host_port=28001
 stream=True
 batch_size=8                  # 本轮客户端最大在途请求数；逐档修改
-request_rate=0               # 0：不限制请求到达速率
+request_rate=-1              # 不限速并发发送；固定 QPS 轮改为正数
 max_out_len=256              # 本轮输出上限；逐档修改
 generation_kwargs=dict(temperature=0, ignore_eos=True)
 ```
 
 `batch_size` 是 AISBench 的客户端并发，不等于 vLLM `max_num_seqs`。
-`request_rate` 是每秒请求数；`0` 表示尽快发送、用于找吞吐平台期。
+本计划按 [AISBench 性能测试文档](https://github.com/AISBench/benchmark/blob/master/docs/source_en/base_tutorials/scenes_intro/performance_benchmark.md)
+使用 `request_rate=-1` 做不限速轮；
+固定 QPS 轮则设置正数。执行前记录 AISBench 提交并核对该版本的参数语义。
 固定长度对照设置 `ignore_eos=True`，让两侧生成相同数量的 token；自然停止
 的业务轮使用 `ignore_eos=False`，但要同时核对两侧输出长度分布。
 
-用 ShareGPT 或实际业务文本作主测试。ShareGPT 示例：
+### GSM8K 子集：本轮可直接执行的样本数
+
+本轮用完整的 `gsm8k_gen_0_shot_cot_str_perf` 数据集配置；固定 0-shot 或
+4-shot 提示模板，不在 A/B 两侧切换。不要选 `demo_gsm8k_*`：demo 配置只
+读取 8 条，不能用于正式性能结论。先用前 200 条检查服务、实际输入输出
+token 数、所选通信路径和错误率；并发与 QPS 的正式比较先用**同一批前 500
+条**，每档至少重复 3 轮：
+
+```bash
+# 快速试跑；两侧使用相同的模型、数据集和参数。
+ais_bench --models catccos_ab_stream \
+  --datasets gsm8k_gen_0_shot_cot_str_perf --mode perf \
+  --num-prompts 200 --num-warmups 20 \
+  --work-dir /home/z00956592/aisbench_results
+
+# 正式轮；修改模型配置中的 batch_size 或 request_rate 后，两侧各运行。
+ais_bench --models catccos_ab_stream \
+  --datasets gsm8k_gen_0_shot_cot_str_perf --mode perf \
+  --num-prompts 500 --num-warmups 20 \
+  --work-dir /home/z00956592/aisbench_results
+```
+
+AISBench 的 `--num-prompts 500` 默认按数据顺序取前 500 条，不随机抽样；
+若自定义数据集配置带 `reader_cfg.test_range`，应核对实际加载的条数与
+顺序。每轮归档数据集文件哈希、提示模板和逐请求结果。前 500 条足以作为
+同输入 A/B 的起点，但不能代表生产请求分布。若高并发档在 2 分钟内跑完，
+将**两侧同档**请求数增加到 800～1000。500 条中的最慢 1% 仅约 5 条，
+不能单靠它判定 P99 改善；关键档位应使用至少 1000 个完成请求并重复测试。
+`ignore_eos=True` 的固定输出长度轮只用于性能比较，GSM8K 精度另用自然
+停止的配置评估。
+
+本轮 GSM8K 是可复现的公开负载。若要评估实际生产收益，还需用业务
+请求或 ShareGPT 类混合输入做补充；保留同一份文件、顺序和请求数。
+ShareGPT 示例：
 
 ```bash
 ais_bench --models catccos_ab_stream --datasets sharegpt_gen \
@@ -120,13 +155,15 @@ ais_bench --models catccos_ab_stream --datasets sharegpt_gen \
 
 ### 并发扫描：找无速率限制的稳定上限
 
-对每个固定负载以及业务混合数据集，令 `request_rate=0`，依次将 `batch_size`
+对 GSM8K、每个固定负载以及业务混合数据集，令 `request_rate=-1`，依次将 `batch_size`
 设为 1、4、8、16、32、64。每档至少预热 20 次，正式轮按吞吐选择请求数，
 使有效测量持续约 2 分钟或更久。若客户端实际并发达不到设定值，先检查
 压测机的 CPU/网络和 AISBench worker；正式轮不要加 `--debug`，它会限制
 客户端并行能力。记录每档实际并发、失败数、请求/s、输入/输出 token/s、
 TTFT/TPOT/E2E 的 P50/P95/P99。继续增大并发直到吞吐进入平台期，或
-延迟/失败率明显恶化。
+延迟/失败率明显恶化。服务 `MAX_NUM_SEQS=8` 时，客户端并发超过 8 主要增加
+排队压力；要测 16 或 32 条同时执行的序列，须将两侧服务的 `MAX_NUM_SEQS`
+一起提高并另做一组 A/B。
 
 ### 固定 QPS：找满足业务 SLO 的容量
 

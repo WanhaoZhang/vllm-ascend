@@ -1,2 +1,2 @@
-* -text
-*.patch whitespace=-trailing-space
+* -text whitespace=cr-at-eol
+*.patch whitespace=cr-at-eol,-trailing-space

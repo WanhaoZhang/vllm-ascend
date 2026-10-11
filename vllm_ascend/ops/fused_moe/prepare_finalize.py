@@ -33,6 +33,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.utils import fc3_all_gather_and_maybe_unpad_impl
 from vllm_ascend.ops.fused_moe.catccos_adapter import catccos_backend_enabled
+from vllm_ascend.ops.fused_moe.deepmegamoe_adapter import deepmegamoe_backend_enabled
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.profiler.moe_profile import moe_profile_component
 from vllm_ascend.quantization.quant_type import QuantType
@@ -64,6 +65,8 @@ class PrepareAndFinalize(ABC):
         moe_comm_type = getattr(_EXTRA_CTX, "moe_comm_type", None)
         if catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2:
             return "catccos"
+        if deepmegamoe_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2:
+            return "deepmegamoe"
         if isinstance(moe_comm_type, MoECommType):
             return f"native_{moe_comm_type.name.lower()}"
         return "moe"

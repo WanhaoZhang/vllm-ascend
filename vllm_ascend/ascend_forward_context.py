@@ -39,6 +39,11 @@ def _catccos_backend_enabled() -> bool:
     return config.enable_fused_mc2 == 1 and getattr(config, "fused_mc2_backend", "auto") == "catccos"
 
 
+def _deepmegamoe_backend_enabled() -> bool:
+    config = get_ascend_config()
+    return config.enable_fused_mc2 == 1 and getattr(config, "fused_mc2_backend", "auto") == "deepmegamoe"
+
+
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
@@ -315,6 +320,14 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    if _deepmegamoe_backend_enabled() and not is_draft_model:
+        capacity = get_ascend_config().deepmegamoe_max_tokens_per_rank
+        if num_tokens > capacity:
+            raise RuntimeError(
+                "DeepMegaMoE token count exceeds deepmegamoe_max_tokens_per_rank: "
+                f"{num_tokens} > {capacity}"
+            )
+        return MoECommType.FUSED_MC2
     if _catccos_backend_enabled() and not is_draft_model:
         min_tokens = getattr(get_ascend_config(), "catccos_min_tokens", 1)
         catccos_capacity = get_catccos_tokens_capacity()

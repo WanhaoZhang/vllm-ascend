@@ -106,6 +106,14 @@ class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod)
         return param_dict
 
     def process_weights_after_loading(self, layer):
+        from vllm_ascend.ops.fused_moe.deepmegamoe_adapter import (
+            deepmegamoe_backend_enabled,
+            prepare_deepmegamoe_weights,
+        )
+
+        if deepmegamoe_backend_enabled():
+            prepare_deepmegamoe_weights(layer)
+            return
         layer.w13_weight.data = torch_npu.npu_format_cast(
             layer.w13_weight.data.view(torch.uint8),
             29,

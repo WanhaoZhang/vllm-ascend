@@ -308,6 +308,29 @@ def test_select_moe_comm_method_a5_catccos(monkeypatch, num_tokens, expected):
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
 
 
+def test_select_deepmegamoe_uses_fused_mc2_with_configured_capacity(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=512,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            fused_mc2_backend="deepmegamoe",
+            deepmegamoe_max_tokens_per_rank=4096,
+        ),
+    )
+    vllm_config = _make_vllm_config(world_size=4, top_k_experts=8)
+
+    assert afc.select_moe_comm_method(4096, vllm_config) == MoECommType.FUSED_MC2
+    with pytest.raises(RuntimeError, match="deepmegamoe_max_tokens_per_rank"):
+        afc.select_moe_comm_method(4097, vllm_config)
+
+
 @pytest.mark.parametrize(
     ("num_tokens", "expected"),
     [

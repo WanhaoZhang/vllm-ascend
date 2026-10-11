@@ -23,9 +23,15 @@ vllm_ascend.ops.fused_moe.fused_moe only.
 
 from __future__ import annotations
 
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
 from vllm_ascend.ops.fused_moe.catccos_adapter import (
     catccos_backend_enabled,
     evaluate_catccos_layer,
+)
+from vllm_ascend.ops.fused_moe.deepmegamoe_adapter import (
+    DeepMegaMoELayerCapability,
+    deepmegamoe_backend_enabled,
+    evaluate_deepmegamoe_layer,
 )
 from vllm_ascend.ops.fused_moe.fused_moe import (
     _EXTRA_CTX,
@@ -104,11 +110,12 @@ class AscendMoERunner(MoERunner):
         trunc_size: int,
     ) -> torch.Tensor:
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        backend = (
-            "catccos"
-            if catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2
-            else f"native_{moe_comm_type.name.lower()}"
-        )
+        if moe_comm_type == MoECommType.FUSED_MC2 and deepmegamoe_backend_enabled():
+            backend = "deepmegamoe"
+        elif moe_comm_type == MoECommType.FUSED_MC2 and catccos_backend_enabled():
+            backend = "catccos"
+        else:
+            backend = f"native_{moe_comm_type.name.lower()}"
         with moe_profile_phase(
             backend,
             "outer_reduce_check",
@@ -322,6 +329,35 @@ class AscendFusedMoE(FusedMoE):
                 f"The routed-expert layer is incompatible with CatCCOS: {self.catccos_capability.reason}"
             )
 
+        self.deepmegamoe_capability = DeepMegaMoELayerCapability(False, "DeepMegaMoE is not selected")
+        if deepmegamoe_backend_enabled():
+            self.deepmegamoe_capability = evaluate_deepmegamoe_layer(
+                self.moe_config,
+                self.quant_method,
+                getattr(self, "activation", "silu"),
+                n_shared_experts=num_shared_experts or int(has_shared_experts),
+                expert_map_path=eplb_config.expert_map_path,
+                mix_placement=self.mix_placement,
+                log2phy=self.log2phy,
+                swiglu_limit=self.swiglu_limit,
+                apply_router_weight_on_input=self.apply_router_weight_on_input,
+                has_bias=self.moe_config.has_bias,
+                zero_expert_type=kwargs.get("zero_expert_type"),
+                is_sequence_parallel=self.moe_config.is_sequence_parallel
+                or enable_sp(self.vllm_config)
+                or enable_sp_by_pass()
+                or flashcomm2_enable()
+                or ascend_config.enable_shared_expert_dp,
+                pcp_size=self.moe_config.pcp_size,
+                speculative_model=getattr(self.vllm_config, "speculative_config", None) is not None,
+                multistream_overlap_gate=self.multistream_overlap_gate,
+            )
+            if not self.deepmegamoe_capability.supported:
+                raise RuntimeError(
+                    "The routed-expert layer is incompatible with DeepMegaMoE: "
+                    f"{self.deepmegamoe_capability.reason}"
+                )
+
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": self.hidden_size,
@@ -340,6 +376,7 @@ class AscendFusedMoE(FusedMoE):
         self._moe_comm_methods = setup_moe_comm_method(
             self.moe_config,
             catccos_capability=self.catccos_capability,
+            deepmegamoe_capability=self.deepmegamoe_capability,
         )
         self.quant_type = self._get_quant_type()
 
@@ -542,11 +579,12 @@ class AscendFusedMoE(FusedMoE):
                 set_flash_common3_context(topk_weights=topk_weights, topk_ids=topk_ids)
 
         moe_comm_type = _EXTRA_CTX.moe_comm_type
-        backend = (
-            "catccos"
-            if catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2
-            else f"native_{moe_comm_type.name.lower()}"
-        )
+        if moe_comm_type == MoECommType.FUSED_MC2 and deepmegamoe_backend_enabled():
+            backend = "deepmegamoe"
+        elif moe_comm_type == MoECommType.FUSED_MC2 and catccos_backend_enabled():
+            backend = "catccos"
+        else:
+            backend = f"native_{moe_comm_type.name.lower()}"
         global_tokens = hidden_states.shape[0]
         rank_local_tokens = global_tokens
         if moe_comm_type in {MoECommType.ALLTOALL, MoECommType.MC2, MoECommType.FUSED_MC2}:
@@ -721,13 +759,8 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                 # Execute activation concurrently with gmm2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                    hidden_states,
-                    topk_weight=None,
-                    group_index=None,
-                    dst_type=torch.float8_e4m3fn,
-                    quant_mode=2,
-                    clamp_value=fused_moe_evts.swiglu_limit,
+                quantized_x, swiglu_out_scale = swiglu_clamp_and_mxfp8_quant(
+                    hidden_states, fused_moe_evts.swiglu_limit
                 )
                 # Execute the down projection concurrently with the combine
                 # communication.

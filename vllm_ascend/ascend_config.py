@@ -196,8 +196,14 @@ class AscendConfig:
             "catccos_sync_after_launch",
             ascend_envs.VLLM_ASCEND_CATCCOS_SYNC_DEVICE,
         )
-        if self.fused_mc2_backend not in {"auto", "cann", "catccos"}:
-            raise ValueError(f"fused_mc2_backend must be auto, cann, or catccos, got {self.fused_mc2_backend!r}")
+        self.deepmegamoe_max_tokens_per_rank = additional_config.get(
+            "deepmegamoe_max_tokens_per_rank",
+            vllm_config.scheduler_config.max_num_batched_tokens,
+        )
+        if self.fused_mc2_backend not in {"auto", "cann", "catccos", "deepmegamoe"}:
+            raise ValueError(
+                f"fused_mc2_backend must be auto, cann, catccos, or deepmegamoe, got {self.fused_mc2_backend!r}"
+            )
         if self.fused_mc2_backend == "catccos":
             self.enable_fused_mc2 = 1
             if (
@@ -215,6 +221,20 @@ class AscendConfig:
                 raise ValueError("CatCCOS requires eager execution")
             if vllm_config.lora_config is not None:
                 raise ValueError("CatCCOS does not support LoRA")
+        if self.fused_mc2_backend == "deepmegamoe":
+            self.enable_fused_mc2 = 1
+            if self.deepmegamoe_max_tokens_per_rank <= 0:
+                raise ValueError("deepmegamoe_max_tokens_per_rank must be positive")
+            if not vllm_config.parallel_config.enable_expert_parallel:
+                raise ValueError("DeepMegaMoE requires expert parallelism")
+            if vllm_config.parallel_config.tensor_parallel_size != 1:
+                raise ValueError("DeepMegaMoE currently requires tensor parallel size 1")
+            if vllm_config.model_config is not None and not vllm_config.model_config.enforce_eager:
+                raise ValueError("DeepMegaMoE requires eager execution")
+            if vllm_config.lora_config is not None:
+                raise ValueError("DeepMegaMoE does not support LoRA")
+            if getattr(vllm_config, "speculative_config", None) is not None:
+                raise ValueError("DeepMegaMoE does not support speculative decoding")
         if self.enable_fused_mc2 == 1 and self.multistream_overlap_shared_expert:
             self.multistream_overlap_shared_expert = False
             logger.warning_once(

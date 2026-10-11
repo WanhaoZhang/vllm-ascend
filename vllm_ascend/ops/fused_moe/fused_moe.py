@@ -33,6 +33,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.activation import swiglu_clamp_and_mxfp8_quant
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
@@ -42,6 +43,7 @@ from vllm_ascend.ops.fused_moe.catccos_adapter import (
     catccos_backend_enabled,
     prepare_catccos_weights,
 )
+from vllm_ascend.ops.fused_moe.deepmegamoe_adapter import deepmegamoe_backend_enabled
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -300,8 +302,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         )
         moe_comm_type = _EXTRA_CTX.moe_comm_type
         assert moe_comm_type is not None, "Missing communication type"
-        uses_catccos = catccos_backend_enabled() and moe_comm_type == MoECommType.FUSED_MC2
-        profile_backend = "catccos" if uses_catccos else f"native_{moe_comm_type.name.lower()}"
+        if moe_comm_type == MoECommType.FUSED_MC2 and deepmegamoe_backend_enabled():
+            profile_backend = "deepmegamoe"
+        elif moe_comm_type == MoECommType.FUSED_MC2 and catccos_backend_enabled():
+            profile_backend = "catccos"
+        else:
+            profile_backend = f"native_{moe_comm_type.name.lower()}"
         sync_boundaries = moe_profile_sync_boundaries_enabled()
         profile_stage = "synchronized_moe_body" if sync_boundaries else "host_moe_body"
         if sync_boundaries:
@@ -820,13 +826,8 @@ else:
                     hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
                     # Execute activation concurrently with gmm2.
                     maybe_wait_event(fused_moe_evts.before_gmm2)
-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                        hidden_states,
-                        topk_weight=None,
-                        group_index=None,
-                        dst_type=torch.float8_e4m3fn,
-                        quant_mode=2,
-                        clamp_value=fused_moe_evts.swiglu_limit,
+                    quantized_x, swiglu_out_scale = swiglu_clamp_and_mxfp8_quant(
+                        hidden_states, fused_moe_evts.swiglu_limit
                     )
                     # Execute the down projection concurrently with the combine
                     # communication.

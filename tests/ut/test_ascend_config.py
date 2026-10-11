@@ -117,6 +117,32 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_deepmegamoe_config(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.additional_config = {
+            "fused_mc2_backend": "deepmegamoe",
+            "deepmegamoe_max_tokens_per_rank": 4096,
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertEqual(ascend_config.enable_fused_mc2, 1)
+        self.assertEqual(ascend_config.deepmegamoe_max_tokens_per_rank, 4096)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_deepmegamoe_rejects_tensor_parallelism(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.parallel_config.enable_expert_parallel = True
+        test_vllm_config.parallel_config.tensor_parallel_size = 2
+        test_vllm_config.additional_config = {"fused_mc2_backend": "deepmegamoe"}
+
+        with self.assertRaisesRegex(ValueError, "tensor parallel size 1"):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_enable_npugraph_ex(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {

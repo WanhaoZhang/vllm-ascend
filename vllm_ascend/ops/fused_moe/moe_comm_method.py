@@ -31,6 +31,11 @@ from vllm_ascend.ops.fused_moe.catccos_adapter import (
     catccos_backend_enabled,
     validate_catccos_operands,
 )
+from vllm_ascend.ops.fused_moe.deepmegamoe_adapter import (
+    DeepMegaMoELayerCapability,
+    apply_deepmegamoe,
+    deepmegamoe_backend_enabled,
+)
 from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEFusedExpertsInput,
@@ -64,6 +69,7 @@ def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | No
 def setup_moe_comm_method(
     moe_config,
     catccos_capability: CatccosLayerCapability | None = None,
+    deepmegamoe_capability: DeepMegaMoELayerCapability | None = None,
 ) -> dict[MoECommType, MoECommMethod]:
     methods: dict[MoECommType, MoECommMethod] = {}
     if moe_config.ep_size > 1:
@@ -73,6 +79,7 @@ def setup_moe_comm_method(
         methods[MoECommType.FUSED_MC2] = FusedMC2CommImpl(
             moe_config,
             catccos_capability=catccos_capability,
+            deepmegamoe_capability=deepmegamoe_capability,
         )
     else:
         methods[MoECommType.ALLGATHER] = AllGatherCommImpl(moe_config)
@@ -315,12 +322,20 @@ class FusedMC2CommImpl(MoECommMethod):
         moe_config,
         *,
         catccos_capability: CatccosLayerCapability | None = None,
+        deepmegamoe_capability: DeepMegaMoELayerCapability | None = None,
     ):
         self.catccos_capability = catccos_capability or CatccosLayerCapability(
             False, "layer capability was not registered"
         )
+        self.deepmegamoe_capability = deepmegamoe_capability or DeepMegaMoELayerCapability(
+            False, "layer capability was not registered"
+        )
         super().__init__(moe_config)
-        if get_ascend_config().enable_fused_mc2 == 1 and not catccos_backend_enabled():
+        if (
+            get_ascend_config().enable_fused_mc2 == 1
+            and not catccos_backend_enabled()
+            and not deepmegamoe_backend_enabled()
+        ):
             self.expert_token_nums = torch.zeros([self.moe_config.num_local_experts], dtype=torch.int32, device="npu")
         else:
             self.expert_token_nums = None
@@ -345,6 +360,47 @@ class FusedMC2CommImpl(MoECommMethod):
         assert isinstance(self.token_dispatcher, TokenDispatcherWithMC2), (
             "token_dispatcher must be an instance of TokenDispatcherWithMC2."
         )
+
+        if deepmegamoe_backend_enabled():
+            if not self.deepmegamoe_capability.supported:
+                raise RuntimeError(
+                    "DeepMegaMoE was selected for an unsupported layer: " f"{self.deepmegamoe_capability.reason}"
+                )
+            routing = fused_experts_input.routing
+            weights = fused_experts_input.weights
+            if fused_experts_input.quant.quant_type != QuantType.W4A8MXFP:
+                raise RuntimeError("DeepMegaMoE requires W4A8 MXFP4 quantization")
+            if (
+                routing.log2phy is not None
+                or routing.global_redundant_expert_num
+                or routing.apply_router_weight_on_input
+                or fused_experts_input.dynamic_eplb
+                or fused_experts_input.lora_context is not None
+                or weights.w1_bias is not None
+                or weights.w2_bias is not None
+            ):
+                raise RuntimeError("DeepMegaMoE received unsupported routing or expert parameters")
+            # vLLM supplies the standard global-to-local expert map on EP
+            # layers. Top-k IDs stay global; MegaMoE owns contiguous placement
+            # and consumes these IDs directly, so this map needs no remapping.
+            if not all(isinstance(t, torch.Tensor) for t in (weights.w1, weights.w2, weights.w1_scale, weights.w2_scale)):
+                raise RuntimeError("DeepMegaMoE requires transformed expert weights and scales as tensors")
+            out = apply_deepmegamoe(
+                fused_experts_input.hidden_states,
+                fused_experts_input.topk_ids,
+                fused_experts_input.topk_weights,
+                weights.w1,
+                weights.w1_scale,
+                weights.w2,
+                weights.w2_scale,
+                self.moe_config,
+                swiglu_limit=fused_experts_input.swiglu_limit,
+            )
+            logger.info_once("Executed deepMegaMoE through the formal FusedMC2 backend")
+            return FusedExpertsResult(
+                routed_out=out,
+                swiglu_limit=fused_experts_input.swiglu_limit,
+            )
 
         if catccos_backend_enabled():
             if not self.catccos_capability.supported:

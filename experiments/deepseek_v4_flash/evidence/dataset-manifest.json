@@ -1,0 +1,49 @@
+{
+  "model": "/data/models/DeepSeek-V4-Flash",
+  "tokenizer_mode": "deepseek_v4",
+  "seed": 42,
+  "samples_per_scenario": 200,
+  "length_definition": "vLLM DeepseekV4Tokenizer apply_chat_template token count",
+  "files": {
+    "decode-128.jsonl": {
+      "sha256": "0cbf050cd2c1b5c592f744f2e9a08f3741761207b7a0dff6415b3d986422f3d3",
+      "rows": 200,
+      "input_tokens": {
+        "min": 128,
+        "median": 128.0,
+        "max": 128
+      }
+    },
+    "prefill-2048.jsonl": {
+      "sha256": "57bb1857e8dffe279603b5732b318ead0332b204dbd844e55b1dea831b0f9ef4",
+      "rows": 200,
+      "input_tokens": {
+        "min": 2048,
+        "median": 2048.0,
+        "max": 2048
+      }
+    },
+    "prefill-4096.jsonl": {
+      "sha256": "eff50bd69655fd5e957b0cc479c1806416585de733f45929817dfa48ca8db43d",
+      "rows": 200,
+      "input_tokens": {
+        "min": 4096,
+        "median": 4096.0,
+        "max": 4096
+      }
+    },
+    "mixed-512-4096-80-20.jsonl": {
+      "sha256": "1446c42791b11bb79b5835470784bfc945ffc0e2e568d7842db52c0f056b1656",
+      "rows": 200,
+      "input_tokens": {
+        "min": 512,
+        "median": 512.0,
+        "max": 4096
+      },
+      "mix_counts": {
+        "512": 160,
+        "4096": 40
+      }
+    }
+  }
+}

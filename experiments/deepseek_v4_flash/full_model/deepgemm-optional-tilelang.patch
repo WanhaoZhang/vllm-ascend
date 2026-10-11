@@ -1,0 +1,10 @@
+diff --git a/deep_gemm/__init__.py b/deep_gemm/__init__.py
+--- a/deep_gemm/__init__.py
++++ b/deep_gemm/__init__.py
+@@ -101 +101,5 @@
+-from .tilelang_ops import tf32_hc_prenorm_gemm
++try:
++    from .tilelang_ops import tf32_hc_prenorm_gemm
++except ModuleNotFoundError as exc:
++    if exc.name != "tilelang":
++        raise

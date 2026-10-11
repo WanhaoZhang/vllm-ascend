@@ -1,0 +1,86 @@
+diff --git a/deep_gemm/__init__.py b/deep_gemm/__init__.py
+index d6cdac2..a4355fc 100644
+--- a/deep_gemm/__init__.py
++++ b/deep_gemm/__init__.py
+@@ -98,6 +98,10 @@ from .locality_domain import (
+ )
+ 
+ # TileLang kernel implementations
+-from .tilelang_ops import tf32_hc_prenorm_gemm
++try:
++    from .tilelang_ops import tf32_hc_prenorm_gemm
++except ModuleNotFoundError as exc:
++    if exc.name != "tilelang":
++        raise
+ 
+ _C.init(__version__, get_library_root_path())
+diff --git a/deep_gemm/include/deep_gemm/ascend.hpp b/deep_gemm/include/deep_gemm/ascend.hpp
+index 1e83e0c..bae808d 100644
+--- a/deep_gemm/include/deep_gemm/ascend.hpp
++++ b/deep_gemm/include/deep_gemm/ascend.hpp
+@@ -1,6 +1,8 @@
+ #pragma once
+ 
+ #include <c_api/asc_simd.h>
++#include <deep_gemm/ascend/cann91_compat.hpp>
++#include <utils/debug/asc_assert.h>
+ #include <deep_gemm/common.hpp>
+ 
+ // Device primitives, split by abstraction layer:
+diff --git a/deep_gemm/include/deep_gemm/comm/mega_moe.hpp b/deep_gemm/include/deep_gemm/comm/mega_moe.hpp
+index adb8aff..bf3701f 100644
+--- a/deep_gemm/include/deep_gemm/comm/mega_moe.hpp
++++ b/deep_gemm/include/deep_gemm/comm/mega_moe.hpp
+@@ -5,6 +5,7 @@
+ 
+ #include <c_api/asc_simd.h>
+ #include <simt_api/device_functions.h>
++#include <utils/debug/asc_printf.h>
+ 
+ namespace deep_gemm::mega_moe::comm {
+ 
+diff --git a/deep_gemm/include/deep_gemm/mega_moe.hpp b/deep_gemm/include/deep_gemm/mega_moe.hpp
+index 5299e05..ec4edc2 100644
+--- a/deep_gemm/include/deep_gemm/mega_moe.hpp
++++ b/deep_gemm/include/deep_gemm/mega_moe.hpp
+@@ -936,6 +936,7 @@ __aicore__ inline void aiv1_epilogue_comm(__gm__ uint8_t* buffer, __gm__ bfloat1
+ 
+             // Quantize one row group
+             const auto input = ub_accum[stage_idx].ptr() + m_idx_in_stage * BLOCK_N;
++
+             const auto output = reinterpret_cast<__ubuf__ float8_e4m3_t*>(ub_accum[stage_idx].ptr()) +
+                                 m_idx_in_stage * (BLOCK_N / 2);
+             const auto output_sf = ub_output_sf[stage_idx].ptr() + m_idx_in_stage;
+diff --git a/deep_gemm/include/deep_gemm/simd/mega_moe.hpp b/deep_gemm/include/deep_gemm/simd/mega_moe.hpp
+index 3d567e6..189a33a 100644
+--- a/deep_gemm/include/deep_gemm/simd/mega_moe.hpp
++++ b/deep_gemm/include/deep_gemm/simd/mega_moe.hpp
+@@ -49,7 +49,7 @@ __simd_vf__ inline void vf_fp4_to_fp8_nz(__ubuf__ uint8_t* src, __ubuf__ uint8_t
+         // Scatter into padded NZ and advance by four rows
+         #pragma unroll
+         for (uint32_t vector_idx = 0; vector_idx < kNumVectors; ++ vector_idx)
+-            asc_storealign_postupdate(dst_ptrs[vector_idx], reinterpret_cast<vector_uint8_t&>(values[vector_idx]),
++            dg_storealign_postupdate(dst_ptrs[vector_idx], reinterpret_cast<vector_uint8_t&>(values[vector_idx]),
+                                       kNumPaddedRows, kNumRowsPerPass, mask);
+     }
+ }
+diff --git a/setup.py b/setup.py
+index e3210b5..caf4af8 100644
+--- a/setup.py
++++ b/setup.py
+@@ -9,7 +9,6 @@ from pathlib import Path
+ from setuptools import find_packages
+ from setuptools.command.build_py import build_py
+ from torch.utils.cpp_extension import CppExtension, BuildExtension
+-from scripts.generate_pyi import generate_pyi_file
+ 
+ 
+ DG_SKIP_BUILD = int(os.getenv('DG_SKIP_BUILD', '0')) == 1
+@@ -117,6 +116,7 @@ class CustomBuildPy(build_py):
+             shutil.copytree(os.path.join(current_dir, name), dst)
+ 
+     def generate_pyi_file(self):
++        from scripts.generate_pyi import generate_pyi_file
+         generate_pyi_file(name='_C', root='./csrc/apis', output_dir='./stubs')
+         pyi_source = os.path.join(current_dir, 'stubs', '_C.pyi')
+         pyi_target = os.path.join(self.build_lib, 'deep_gemm', '_C.pyi')

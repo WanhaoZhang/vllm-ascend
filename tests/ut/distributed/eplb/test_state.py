@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
+import json
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +20,7 @@ from vllm_ascend.distributed.eplb.eplb_state import (
     AscendEplbLayerState,
     AscendEplbState,
 )
+from vllm_ascend.distributed.eplb.placement import write_placement_snapshot
 from vllm_ascend.distributed.eplb.policy.stair import StairEplbPolicy
 
 
@@ -334,6 +337,67 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
 
     assert result is sentinel
     refresh.assert_called_once_with(model_states["model"])
+
+
+@pytest.mark.parametrize("is_profile,ep_rank", [(False, 0), (True, 0), (False, 1)])
+def test_sync_rearrange_exports_committed_placement(monkeypatch, tmp_path, is_profile, ep_rank):
+    path = tmp_path / "placement.json"
+    committed = torch.tensor([[1, 0, 0, 1]])
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(num_logical_experts=2, num_physical_experts=4),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
+    )
+
+    def upstream_rearrange(self, is_profile=False, rank_mapping=None):
+        if not is_profile:
+            model_state.physical_to_logical_map.copy_(committed)
+
+    def refresh(state):
+        torch.testing.assert_close(state.physical_to_logical_map, committed)
+        assert not path.exists()
+
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
+    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank, world_size=2))
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._suspended = False
+    state.is_async = False
+    state.model_states = {"target": model_state}
+    state._placement_export_path = str(path)
+    state._placement_models = {"target": {"model": "test-moe", "revision": "r1"}}
+    state.rearrange(is_profile=is_profile)
+
+    if is_profile or ep_rank != 0:
+        assert not path.exists()
+    else:
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "ep_size": 2,
+            "models": {
+                "target": {
+                    "model": "test-moe",
+                    "revision": "r1",
+                    "num_logical_experts": 2,
+                    "num_redundant_experts": 2,
+                    "physical_to_logical_map": committed.tolist(),
+                }
+            },
+        }
+
+
+def test_placement_snapshot_keeps_previous_file_if_replace_fails(monkeypatch, tmp_path):
+    path = tmp_path / "placement.json"
+    path.write_text('{"version": 1}', encoding="utf-8")
+
+    def fail_replace(self, target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failed"):
+        write_placement_snapshot(str(path), {"version": 2})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"version": 1}
+    assert list(tmp_path.iterdir()) == [path]
 
 
 def test_async_rearrange_defers_routing_refresh_to_workspace_hook(monkeypatch):

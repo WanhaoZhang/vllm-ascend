@@ -295,6 +295,7 @@ class EplbConfig:
     expert_heat_collection_interval: int = 600
     algorithm_execution_interval: int = 50
     expert_map_record_path: str | None = None
+    mrv2_placement_export_path: str | None = None
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
@@ -306,6 +307,8 @@ class EplbConfig:
 
     @model_validator(mode="after")
     def _validate_config(self):
+        if self.mrv2_placement_export_path is not None and not self.mrv2_placement_export_path.endswith(".json"):
+            raise ValueError("mrv2_placement_export_path must point to a JSON file.")
         if self.expert_map_path is not None:
             logger.info("The expert_map is %s", self.expert_map_path)
             if self.expert_map_path[-5:] != ".json":
@@ -689,6 +692,16 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if self.eplb_config.mrv2_placement_export_path is not None:
+            parallel_config = vc.parallel_config
+            if (
+                not vc.use_v2_model_runner
+                or not parallel_config.enable_eplb
+                or parallel_config.eplb_config.use_async
+                or parallel_config.enable_elastic_ep
+                or parallel_config.pipeline_parallel_size != 1
+            ):
+                raise ValueError("Placement export requires MRV2, synchronous EPLB, elastic EP disabled, and PP=1.")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

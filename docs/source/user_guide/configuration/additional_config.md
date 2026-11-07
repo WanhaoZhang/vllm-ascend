@@ -169,11 +169,18 @@ configuration.
 | `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
 | `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
 | `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
+| `mrv2_placement_export_path`      | str | `None` | MRv2 only. Atomically export the active physical-to-logical expert map and model metadata after synchronous EPLB rearrangement. Requires EPLB enabled, PP=1, elastic EP disabled, and a single EP group covering all worker ranks. |
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
 | `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
+
+For example, with synchronous EPLB enabled in MRV2, pass
+`--additional-config '{"eplb_config":{"mrv2_placement_export_path":"/tmp/eplb-placement.json"}}'`.
+EP rank 0 replaces this file after each committed rearrangement. Use a distinct path
+per engine. Each model entry stores one map row per MoE layer in execution order.
+Set the model revision explicitly to record it in the snapshot.
 
 **scheduler_config**
 

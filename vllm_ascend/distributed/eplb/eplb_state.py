@@ -286,7 +286,7 @@ class AscendEplbState(_eplb_state.EplbState):
         self._suspended = False
         self._close_error: Exception | None = None
         self._hixl_session: _HixlSession | None = None
-        self._placement_export_path: str | None = None
+        self._placement_export: tuple[str, int] | None = None
         self._placement_models: dict[str, dict[str, str | None]] = {}
         # vLLM main renamed ``EplbState.cuda_device_index`` to ``device_index``
         # (and passes it to EplbModelState on add_model), so keep both lanes
@@ -323,21 +323,26 @@ class AscendEplbState(_eplb_state.EplbState):
         model_state._allgather_physical_map = model_state.physical_to_logical_map.clone()
         if self.uses_custom_load_stats:
             self._initialize_load_stats_state(model_state)
-        if getattr(self, "_placement_export_path", None) is not None:
+        if getattr(self, "_placement_export", None) is not None:
             self._placement_models[model_key] = {"model": model_config.model, "revision": model_config.revision}
             model_state._export_eplb_placement_after_commit = self._export_committed_placement
 
     def enable_placement_export(self, path: str) -> None:
+        if self.model_states:
+            raise RuntimeError("MRV2 placement export must be configured before registering EPLB models.")
+        if not torch.distributed.is_initialized():
+            raise RuntimeError("MRV2 placement export requires initialized distributed worker groups.")
         ep_group = get_ep_group()
         if ep_group.world_size != torch.distributed.get_world_size():
             raise ValueError("MRV2 placement export requires a single EP group covering all worker ranks.")
         if ep_group.rank_in_group == 0:
-            self._placement_export_path = path
+            self._placement_export = (path, ep_group.world_size)
 
     def _export_committed_placement(self) -> None:
-        path = self._placement_export_path
-        if path is None or any(state.rebalanced for state in self.model_states.values()):
+        export = self._placement_export
+        if export is None or any(state.rebalanced for state in self.model_states.values()):
             return
+        path, ep_size = export
         # Read the active maps on the stream that committed the last layer.
         with gpu_sync_allowed():
             models = {
@@ -350,7 +355,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 for key, state in self.model_states.items()
             }
         try:
-            write_placement_snapshot(path, {"version": 1, "ep_size": get_ep_group().world_size, "models": models})
+            write_placement_snapshot(path, {"version": 1, "ep_size": ep_size, "models": models})
         except OSError:
             logger.exception("Could not export committed MRV2 EPLB placement to %s", path)
 

@@ -350,12 +350,14 @@ def test_exports_placement_only_on_writer_after_all_models_commit(monkeypatch, t
     )
 
     monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank, world_size=2))
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
     monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
     state = AscendEplbState.__new__(AscendEplbState)
-    state.model_states = {"target": model_state}
-    state._placement_export_path = None
-    state._placement_models = {"target": {"model": "test-moe", "revision": "r1"}}
+    state.model_states = {}
+    state._placement_export = None
     state.enable_placement_export(str(path))
+    state.model_states["target"] = model_state
+    state._placement_models = {"target": {"model": "test-moe", "revision": "r1"}}
     state._export_committed_placement()
 
     if in_progress or ep_rank != 0:
@@ -374,6 +376,23 @@ def test_exports_placement_only_on_writer_after_all_models_commit(monkeypatch, t
                 }
             },
         }
+
+
+def test_placement_export_rejects_invalid_setup(monkeypatch, tmp_path):
+    path = str(tmp_path / "placement.json")
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = {}
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    with pytest.raises(RuntimeError, match="initialized distributed worker groups"):
+        state.enable_placement_export(path)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 4)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=2))
+    with pytest.raises(ValueError, match="single EP group"):
+        state.enable_placement_export(path)
+    state.model_states["target"] = object()
+    with pytest.raises(RuntimeError, match="before registering EPLB models"):
+        state.enable_placement_export(path)
 
 
 def test_placement_snapshot_keeps_previous_file_if_replace_fails(monkeypatch, tmp_path):

@@ -325,17 +325,20 @@ class AscendEplbState(_eplb_state.EplbState):
             self._initialize_load_stats_state(model_state)
         if getattr(self, "_placement_export_path", None) is not None:
             self._placement_models[model_key] = {"model": model_config.model, "revision": model_config.revision}
+            model_state._export_eplb_placement_after_commit = self._export_committed_placement
 
     def enable_placement_export(self, path: str) -> None:
-        if get_ep_group().world_size != torch.distributed.get_world_size():
-            raise ValueError("MRV2 placement export requires a single EP group covering all worker ranks.")
-        self._placement_export_path = path
-
-    def _export_committed_placement(self, path: str) -> None:
         ep_group = get_ep_group()
-        if ep_group.rank_in_group != 0:
+        if ep_group.world_size != torch.distributed.get_world_size():
+            raise ValueError("MRV2 placement export requires a single EP group covering all worker ranks.")
+        if ep_group.rank_in_group == 0:
+            self._placement_export_path = path
+
+    def _export_committed_placement(self) -> None:
+        path = self._placement_export_path
+        if path is None or any(state.rebalanced for state in self.model_states.values()):
             return
-        # The synchronous upstream commit installs the same global map on each EP rank.
+        # Read the active maps on the stream that committed the last layer.
         with gpu_sync_allowed():
             models = {
                 key: {
@@ -347,7 +350,7 @@ class AscendEplbState(_eplb_state.EplbState):
                 for key, state in self.model_states.items()
             }
         try:
-            write_placement_snapshot(path, {"version": 1, "ep_size": ep_group.world_size, "models": models})
+            write_placement_snapshot(path, {"version": 1, "ep_size": get_ep_group().world_size, "models": models})
         except OSError:
             logger.exception("Could not export committed MRV2 EPLB placement to %s", path)
 
@@ -683,9 +686,6 @@ class AscendEplbState(_eplb_state.EplbState):
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)
-            path = getattr(self, "_placement_export_path", None)
-            if path is not None and rank_mapping is None:
-                self._export_committed_placement(path)
         if not is_profile:
             self._has_fresh_recorded_load = False
         return result

@@ -339,35 +339,26 @@ def test_sync_rearrange_refreshes_all_model_routing_tables(monkeypatch):
     refresh.assert_called_once_with(model_states["model"])
 
 
-@pytest.mark.parametrize("is_profile,ep_rank", [(False, 0), (True, 0), (False, 1)])
-def test_sync_rearrange_exports_committed_placement(monkeypatch, tmp_path, is_profile, ep_rank):
+@pytest.mark.parametrize("in_progress,ep_rank", [(False, 0), (True, 0), (False, 1)])
+def test_exports_placement_only_on_writer_after_all_models_commit(monkeypatch, tmp_path, in_progress, ep_rank):
     path = tmp_path / "placement.json"
     committed = torch.tensor([[1, 0, 0, 1]])
     model_state = SimpleNamespace(
         model=SimpleNamespace(num_logical_experts=2, num_physical_experts=4),
-        physical_to_logical_map=torch.tensor([[0, 1, 0, 1]]),
+        physical_to_logical_map=committed,
+        rebalanced=in_progress,
     )
 
-    def upstream_rearrange(self, is_profile=False, rank_mapping=None):
-        if not is_profile:
-            model_state.physical_to_logical_map.copy_(committed)
-
-    def refresh(state):
-        torch.testing.assert_close(state.physical_to_logical_map, committed)
-        assert not path.exists()
-
-    monkeypatch.setattr(upstream_eplb_state.EplbState, "rearrange", upstream_rearrange)
-    monkeypatch.setattr(eplb_state, "refresh_model_routing_tables", refresh)
     monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(rank_in_group=ep_rank, world_size=2))
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
     state = AscendEplbState.__new__(AscendEplbState)
-    state._suspended = False
-    state.is_async = False
     state.model_states = {"target": model_state}
-    state._placement_export_path = str(path)
+    state._placement_export_path = None
     state._placement_models = {"target": {"model": "test-moe", "revision": "r1"}}
-    state.rearrange(is_profile=is_profile)
+    state.enable_placement_export(str(path))
+    state._export_committed_placement()
 
-    if is_profile or ep_rank != 0:
+    if in_progress or ep_rank != 0:
         assert not path.exists()
     else:
         assert json.loads(path.read_text(encoding="utf-8")) == {

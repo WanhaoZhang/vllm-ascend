@@ -694,14 +694,15 @@ class AscendConfig:
         vc = vllm_config
         if self.eplb_config.mrv2_placement_export_path is not None:
             parallel_config = vc.parallel_config
-            if (
+            if not parallel_config.enable_eplb and not is_draft_config_context():
+                raise ValueError("Placement export requires --enable-eplb.")
+            if parallel_config.enable_eplb and (
                 not vc.use_v2_model_runner
-                or not parallel_config.enable_eplb
-                or parallel_config.eplb_config.use_async
+                or not parallel_config.eplb_config.use_async
                 or parallel_config.enable_elastic_ep
                 or parallel_config.pipeline_parallel_size != 1
             ):
-                raise ValueError("Placement export requires MRV2, synchronous EPLB, elastic EP disabled, and PP=1.")
+                raise ValueError("Placement export requires MRV2, asynchronous EPLB, elastic EP disabled, and PP=1.")
         engram_config = getattr(vc, "engram_config", None)
         if (
             engram_config is not None

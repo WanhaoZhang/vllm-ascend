@@ -147,7 +147,8 @@ Both warmups run on a background thread during weight loading. The worker waits 
 
 The accepted fields depend on the model runner:
 
-- **Model Runner V2** accepts `load_collection_phase` and `stair_config` here.
+- **Model Runner V2** accepts `load_collection_phase`, `mrv2_placement_export_path`,
+  and `stair_config` here.
   Configure upstream EPLB through `--enable-eplb` and `--eplb-config`. Ascend
   uses the STAIR policy by default and moves expert weights asynchronously
   over HIXL when it is available on every EPLB rank, falling back to Gloo
@@ -155,8 +156,7 @@ The accepted fields depend on the model runner:
   upstream `--eplb-config.policy` option. See the
   [EPLB user guide](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions)
   for the advanced STAIR fields and their defaults.
-- **Model Runner V1** accepts the legacy fields below except
-  `load_collection_phase` and `stair_config`.
+- **Model Runner V1** accepts the legacy fields below.
   MRv1 does not accept upstream `--enable-eplb` on Ascend.
 
 Mixing the two schemas fails during startup instead of silently ignoring
@@ -169,14 +169,14 @@ configuration.
 | `expert_heat_collection_interval`| int | `600`  | MRv1 only. Number of forward iterations used to collect expert heat. |
 | `algorithm_execution_interval`   | int | `50`   | MRv1 only. Interval allowed for the EPLB worker to finish its CPU task. |
 | `expert_map_record_path`         | str | `None` | MRv1 only. Save the calculated expert map to the specified JSON path. |
-| `mrv2_placement_export_path`      | str | `None` | MRv2 only. Atomically export the active physical-to-logical expert map and model metadata after synchronous EPLB rearrangement. Requires EPLB enabled, PP=1, elastic EP disabled, and a single EP group covering all worker ranks. |
+| `mrv2_placement_export_path`      | str | `None` | MRv2 only. Atomically export the active physical-to-logical expert map and model metadata after asynchronous EPLB commits. Requires EPLB enabled, PP=1, elastic EP disabled, and a single EP group covering all worker ranks. |
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
 | `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load collection. Only effective with the STAIR policy; a value other than `"all"` requires `--enable-eplb`. Any batch containing a prefill request is classified entirely as prefill. |
 | `stair_config`                   | dict | `{}`   | MRv2 only. Advanced STAIR policy tuning. See the [tuning suggestions table](../feature_guide/expert_parallelism_load_balancer.md#tuning-suggestions) for all fields, defaults, and ranges. |
 
-For example, with synchronous EPLB enabled in MRV2, pass
+For example, with EPLB enabled in MRV2, pass
 `--additional-config '{"eplb_config":{"mrv2_placement_export_path":"/tmp/eplb-placement.json"}}'`.
 EP rank 0 replaces this file after each committed rearrangement. Use a distinct path
 per engine. Each model entry stores one map row per MoE layer in execution order.

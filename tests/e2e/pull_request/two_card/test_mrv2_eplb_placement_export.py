@@ -20,7 +20,7 @@ from vllm.utils.network_utils import get_open_port
 from vllm_ascend.distributed.eplb import eplb_state as ascend
 from vllm_ascend.distributed.eplb.explicit_transfer import stage_explicit_layer_transfer
 from vllm_ascend.patch.platform import patch_eplb
-from vllm_ascend.utils import is_950
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 _RANKS = 2
 _EXPERTS_PER_RANK = 2
@@ -133,8 +133,11 @@ def _check_commits(rank: int, device: torch.device, path: Path) -> None:
     }
 
 
-@pytest.mark.skipif(not is_950(), reason="A5 MRV2 EPLB placement regression")
-def test_a5_mrv2_exports_after_final_commit(tmp_path):
+@pytest.mark.skipif(
+    get_ascend_device_type() not in (AscendDeviceType.A3, AscendDeviceType.A5),
+    reason="Requires Ascend A3 or A5",
+)
+def test_mrv2_exports_after_final_commit(tmp_path):
     workers = mp.spawn(
         _run_placement_export, args=(get_open_port(), tmp_path / "placement.json"), nprocs=_RANKS, join=False
     )
